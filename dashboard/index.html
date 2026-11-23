@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Launch Radar — pre-token protocols, ranked by what a launch would be worth</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>LAUNCH RADAR</h1>
+  <p id="subtitle">Pre-token protocols, ranked by expected launch value. Data: DefiLlama public API (snapshot). A protocol that records no token may still have one its record does not carry.</p>
+  <div id="kpis"></div>
+  <div id="filters">
+    <input id="q" type="search" placeholder="Search name or slug…" aria-label="Search">
+    <select id="cat" aria-label="Category"><option value="">All categories</option></select>
+    <select id="chain" aria-label="Chain"><option value="">All chains</option></select>
+    <label><input id="watch" type="checkbox"> Watchlist only</label>
+  </div>
+</header>
+<main>
+  <section id="validation"></section>
+  <table id="board">
+    <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th>Chains</th><th>TVL</th><th>7d</th><th>Multiple</th><th>Implied value</th><th>Token odds</th><th>Expected value</th><th>Watchlist</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <section id="detail" hidden>
+    <h2 id="detail-name"></h2>
+    <div id="detail-body"></div>
+  </section>
+</main>
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
