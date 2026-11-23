@@ -9,7 +9,7 @@
 <body>
 <header>
   <h1>LAUNCH RADAR</h1>
-  <p id="subtitle">Pre-token protocols, ranked by expected launch value. Data: DefiLlama public API (snapshot). A protocol that records no token may still have one its record does not carry.</p>
+  <p id="subtitle">Pre-token protocols, ranked by implied value. Data: DefiLlama public API (snapshot). A protocol that records no token may still have one its record does not carry.</p>
   <div id="kpis"></div>
   <div id="filters">
     <input id="q" type="search" placeholder="Search name or slug…" aria-label="Search">
@@ -21,7 +21,7 @@
 <main>
   <section id="validation"></section>
   <table id="board">
-    <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th>Chains</th><th>TVL</th><th>7d</th><th>Multiple</th><th>Implied value</th><th>Token odds</th><th>Expected value</th><th>Watchlist</th></tr></thead>
+    <thead><tr><th>Rank</th><th>Protocol</th><th>Category</th><th>Chains</th><th>TVL</th><th>7d</th><th>Multiple</th><th>Implied value</th><th>Token odds</th><th>Expected value</th><th>Watchlist</th></tr></thead>
     <tbody id="rows"></tbody>
   </table>
   <section id="detail" hidden>
@@ -29,7 +29,7 @@
     <div id="detail-body"></div>
   </section>
 </main>
-<script src="data.js"></script>
+<script src="../data.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

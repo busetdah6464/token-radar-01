@@ -14,35 +14,40 @@ a detail view for each protocol, a filter, and the steps to farm it.
 
 - Category multiple: geometric median market-cap / TVL per category, from
   traded protocols with TVL >= $5M (ratios 0.01x–10x). Global multiple
-  0.25x on the local test snapshot (23 Nov 2026, live DefiLlama data).
+  0.24x on the sealed snapshot (as_of 2026-11-14, 758 protocols).
 - Implied value = TVL x category multiple x growth factor
   (1 + clamp(change_7d, -20%, +20%) / 2).
 - Token odds: share of protocols in the category that record a token,
   shrunk toward the global share.
-- Expected value = implied value x token odds. The board ranks by it.
+- Expected value = implied value x token odds. The board ranks by implied
+  value (rank 1 = highest); expected value stays as a secondary column.
 - Held-out validation, reported as-is: traded protocols split by listing
   date, older half trains, newer half tests. Median predicted/actual
-  0.97x on 45 held-out protocols (median absolute error 94% — ratios are
+  0.88x on 48 held-out protocols (median absolute error 91.4% — ratios are
   wide, the multiple is a median, not a precise price).
 - Launch candidates exclude wrapped / staked / bridged products, versioned
   duplicates and exchange products, per the watchlist rule. A protocol
   that records no token may still have one its record does not carry —
   the dashboard says so, never that it has none.
 
-Local test (live DefiLlama, 23 Nov 2026): 190 pre-token rows, watchlist
-51/51 covered. Top: USDD, Veda, Sentora Curator, Steakhouse Financial.
+Sealed snapshot (as_of 2026-11-14): 198 pre-token rows, watchlist 40/40
+covered. Top: Sentora Curator ($658.5M implied), Steakhouse Financial,
+Gauntlet. Two runs to different output directories are byte-identical
+(deterministic); `python3 check-gate.py <output-dir> <snapshot.json>`
+re-runs the gate checks locally (board, ranks, coverage, farm steps,
+dashboard, screenshots, dossier).
 
 ## Run it
 
 ```sh
 SNAPSHOT=/input/snapshot.json MAKEFUN_OUTPUT_DIR=/output node main.ts
+# or: node main.ts --input /path/to/snapshot.json --output /output
 ```
 
-`main.ts` writes `/output/board.json`, `/output/data.js`, copies
-`dashboard/` and `screenshots/`, and writes a best-effort
-`/output/dossier.json`. Note: `vendor/makefun-board.ts` from the kit was
-not available when this was built (make.fun kit 503) — the dossier must
-be rebuilt with the kit's vendor file before submitting.
+`main.ts` writes `/output/board.json` (`{"rows": [...]}`), `/output/data.js`,
+copies `dashboard/` and `screenshots/`, and writes `/output/dossier.json`
+last via `buildDossier` from `vendor/makefun-board.ts` (vendored verbatim
+from the kit), so the dossier is byte-for-byte what the scorer rebuilds.
 
 ---
 

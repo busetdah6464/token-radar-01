@@ -16,7 +16,7 @@ fillSelect('chain', RADAR.rows.flatMap((r) => r.chains));
 document.getElementById('kpis').innerHTML =
   '<div class="kpi"><b>' + RADAR.rows.length + '</b><span>pre-token rows</span></div>' +
   '<div class="kpi"><b>' + RADAR.watchlist_size + '</b><span>on watchlist</span></div>' +
-  '<div class="kpi"><b>' + fmt(RADAR.rows[0].expected_value_usd) + '</b><span>top expected value (' + RADAR.rows[0].name + ')</span></div>' +
+  '<div class="kpi"><b>' + fmt(RADAR.rows[0].implied_value_usd) + '</b><span>top implied value (' + RADAR.rows[0].name + ', rank #' + RADAR.rows[0].rank + ')</span></div>' +
   '<div class="kpi"><b>' + RADAR.meta.global_multiple + 'x</b><span>global mcap/TVL multiple</span></div>' +
   '<div class="kpi"><b>' + RADAR.as_of + '</b><span>snapshot date</span></div>';
 
@@ -35,7 +35,7 @@ function render() {
     (!cat || r.category === cat) && (!chain || r.chains.includes(chain)) &&
     (!watch || r.on_watchlist));
   document.getElementById('rows').innerHTML = rows.map((r, i) =>
-    '<tr data-slug="' + r.slug + '"><td>' + (i + 1) + '</td><td><b>' + r.name + '</b><br><small>' + r.slug + '</small></td><td>' + (r.category || '') + '</td><td>' + r.chains.slice(0, 3).join(', ') + '</td><td>' + fmt(r.tvl_usd) + '</td><td class="' + (r.change_7d >= 0 ? 'pos' : 'neg') + '">' + (r.change_7d == null ? '—' : (r.change_7d >= 0 ? '+' : '') + r.change_7d.toFixed(1) + '%') + '</td><td>' + r.multiple + 'x</td><td>' + fmt(r.implied_value_usd) + '</td><td>' + Math.round(r.token_odds * 100) + '%</td><td><b>' + fmt(r.expected_value_usd) + '</b></td><td>' + (r.on_watchlist ? '★' : '') + '</td></tr>').join('');
+    '<tr data-slug="' + r.slug + '"><td>' + r.rank + '</td><td><b>' + r.name + '</b><br><small>' + r.slug + '</small></td><td>' + (r.category || '') + '</td><td>' + r.chains.slice(0, 3).join(', ') + '</td><td>' + fmt(r.tvl_usd) + '</td><td class="' + (r.change_7d >= 0 ? 'pos' : 'neg') + '">' + (r.change_7d == null ? '—' : (r.change_7d >= 0 ? '+' : '') + r.change_7d.toFixed(1) + '%') + '</td><td>' + r.multiple + 'x</td><td><b>' + fmt(r.implied_value_usd) + '</b></td><td>' + Math.round(r.token_odds * 100) + '%</td><td>' + fmt(r.expected_value_usd) + '</td><td>' + (r.on_watchlist ? '★' : '') + '</td></tr>').join('');
   document.querySelectorAll('#rows tr').forEach((tr) => tr.addEventListener('click', () => showDetail(tr.dataset.slug)));
 }
 
@@ -43,12 +43,12 @@ function showDetail(slug) {
   const r = RADAR.rows.find((x) => x.slug === slug);
   if (!r) return;
   document.getElementById('detail').hidden = false;
-  document.getElementById('detail-name').textContent = r.name + ' — ' + fmt(r.expected_value_usd) + ' expected value';
+  document.getElementById('detail-name').textContent = '#' + r.rank + ' ' + r.name + ' — ' + fmt(r.implied_value_usd) + ' implied value';
   document.getElementById('detail-body').innerHTML =
     '<p>Category: ' + (r.category || '—') + ' · Chains: ' + r.chains.join(', ') + ' · TVL ' + fmt(r.tvl_usd) +
-    ' · Implied value ' + fmt(r.implied_value_usd) + ' at ' + r.multiple + 'x · Token odds ' + Math.round(r.token_odds * 100) + '% · Watchlist: ' + (r.on_watchlist ? 'yes' : 'no') + '</p>' +
+    ' · Implied value ' + fmt(r.implied_value_usd) + ' at ' + r.multiple + 'x · Token odds ' + Math.round(r.token_odds * 100) + '% · Expected value ' + fmt(r.expected_value_usd) + ' · Watchlist: ' + (r.on_watchlist ? 'yes' : 'no') + '</p>' +
     '<p>' + r.note + '</p>' +
-    '<h3>Farm plan (deposit tiers $100 / $1,000 / $10,000)</h3><ol>' + r.farm_plan.map((s) => '<li>' + s + '</li>').join('') + '</ol>' +
+    '<h3>Farm steps (deposit tiers $100 / $1,000 / $10,000)</h3><ol>' + r.farm_steps.map((s) => '<li>' + s + '</li>').join('') + '</ol>' +
     '<p>Cost: gas on the protocol\'s main chain plus the deposit itself; no token purchase is required to farm.</p>';
   document.getElementById('detail').scrollIntoView();
 }
