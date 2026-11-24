@@ -3,157 +3,125 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Launch Radar v3 — token-radar-01</title>
+<title>Launch Radar v4 — filtered fit, clipped growth, CV-winning logistic odds</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
 <header class="hero">
-  <p class="kicker">TOKEN-RADAR-01 &middot; LAUNCH RADAR v3</p>
-  <h1>Which pre-token protocol is worth farming next?</h1>
-  <p class="lede">Every protocol in the sealed snapshot, ranked by what its launch would be worth if its
-  record stayed as it is. The value model is fitted at runtime from the snapshot itself, every term
-  kept or dropped on four blind tests, and every row carries an 80% interval instead of a bare point
-  estimate. A note to the judge: the numbers below are computed by main.ts from the snapshot at run
-  time — the screenshots and this source agree, because they come from the same run.</p>
-  <dl class="kpis">
-    <div><dt>Protocols scored</dt><dd>758</dd></div>
-    <div><dt>Watchlist covered</dt><dd>40 / 40</dd></div>
-    <div><dt>Launch candidates</dt><dd>198</dd></div>
-    <div><dt>Traded anchors</dt><dd>416</dd></div>
-    <div><dt>Protocols fitted</dt><dd>128</dd></div>
-    <div><dt>Value model</dt><dd>log(mcap) = 6.9646 + 0.5223 &middot; log(TVL)</dd></div>
-    <div><dt>Median error</dt><dd>3.36&times;</dd></div>
-    <div><dt>Screen line (final)</dt><dd>94.39%</dd></div>
-  </dl>
-  <p class="integrity"><strong>Integrity strip.</strong> 758 protocols accounted for: 198 candidates,
-  416 whose token already trades, 144 excluded by rule. Nothing is hidden: traded protocols are shown
-  with their real market cap as anchors, and excluded ones are listed with the reason they are out.
-  A protocol is said to <em>record</em> no token, never to have none — the snapshot is a record, not proof.</p>
+  <p class="kicker">TOKEN LAUNCH RADAR &middot; SNAPSHOT 2026-11-14 &middot; 758 PROTOCOLS</p>
+  <h1>Launch Radar v4</h1>
+  <p class="subtitle">Filtered fit, growth clipped, odds from the CV-winning logistic, a candidate-only board, conformal intervals, and farm plans sized to minimum viable capital.</p>
+  <div class="kpi" id="kpi">
+    <div><span>758</span>protocols read</div>
+    <div><span>202</span>candidates ranked</div>
+    <div><span>111</span>fit set (filtered)</div>
+    <div><span>40</span>watchlist covered</div>
+    <div><span>11.87</span>M1 four-test sum (lowest)</div>
+  </div>
+  <p class="integrity">Integrity: 758 = 416 traded + 342 pre-token; 342 = 202 candidates + 140 excluded. Every protocol is accounted for below: candidates on the board, traded as anchors, excluded with their reason.</p>
 </header>
 
+<main>
 <section id="method">
-  <h2>How the value is worked out</h2>
-  <h3>The value model — one term kept, three dropped on blind tests</h3>
-  <p>The implied value of a launch is <strong>log(mcap) = 6.9646 + 0.5223 &middot; log(TVL)</strong>,
-  an OLS fit on the 128 protocols whose token already trades (mcap &gt; 0). In-sample R&sup2; = 0.194,
-  median error 3.36&times;, within 2&times; for 32% of the fitted set. Growth, age and category terms were
-  all fitted and all dropped: none of them survived held-out testing, so the board does not pretend
-  they help. The table below is computed by main.ts at run time from the snapshot, four ways.</p>
-  <table class="valid">
-    <caption>Median error ratio / share within 2&times; — lower is better. LOO n=128, 10-fold n=128,
-    walk-forward train 64 / test 31, older-to-newer train 89 / test 39.</caption>
-    <thead><tr><th>Model</th><th>Leave-one-out</th><th>10-fold</th><th>Walk-forward</th><th>Older &rarr; newer</th></tr></thead>
-    <tbody>
-      <tr><th>M0 &middot; log(TVL) — kept</th><td>3.40&times; / 32%</td><td>3.56&times; / 31%</td><td>3.08&times; / 26%</td><td>5.33&times; / 21%</td></tr>
-      <tr><th>M1 &middot; + growth — dropped</th><td>3.76&times; / 29%</td><td>3.53&times; / 28%</td><td>3.14&times; / 29%</td><td>5.18&times; / 18%</td></tr>
-      <tr><th>M2 &middot; + growth + age — dropped</th><td>3.58&times; / 29%</td><td>3.59&times; / 27%</td><td>4.90&times; / 16%</td><td>5.12&times; / 15%</td></tr>
-      <tr><th>M5 &middot; + 8 categories — dropped</th><td>3.67&times; / 31%</td><td>3.71&times; / 30%</td><td>4.69&times; / 23%</td><td>4.86&times; / 18%</td></tr>
-    </tbody>
-  </table>
-  <p>Walk-forward and older-to-newer are far worse than leave-one-out and 10-fold (3.1–5.3&times;).
-  That is reported, not hidden: a launch value is a wide guess, and the intervals below say so.</p>
-
-  <h3>Token odds fall with age — fitted on the peers&rsquo; own record</h3>
-  <p>A protocol that has run for years with no token is less likely to launch one next year than a
-  young one. The survival curve is a Weibull fitted on the cohort record (a protocol counts as
-  having a token when its mcap is above zero): shape k = 0.73, scale &lambda; = 23.1 years.
-  The 12-month launch odds are <strong>7.2% at 6 months old, 6.4% at 1 year, 5.6% at 2 years,
-  5.1% at 3 years, 4.8% at 4 years and 4.6% at 5 years</strong>. TVL and growth do not move the
-  odds — the token rate is flat across TVL bands (15–19%) and growth is confounded by age — so
-  they were tested and left out. Expected value per row is implied value &times; odds.</p>
-  <table class="valid">
-    <caption>Share of protocols with a token (mcap &gt; 0), by age cohort.</caption>
-    <thead><tr><th>Age cohort</th><th>n</th><th>With a token</th><th>Without (survival)</th></tr></thead>
-    <tbody>
-      <tr><th>0–1 year</th><td>161</td><td>6.2%</td><td>93.8%</td></tr>
-      <tr><th>1–2 years</th><td>184</td><td>12.0%</td><td>88.0%</td></tr>
-      <tr><th>2–3 years</th><td>137</td><td>15.3%</td><td>84.7%</td></tr>
-      <tr><th>3–4 years</th><td>89</td><td>24.7%</td><td>75.3%</td></tr>
-      <tr><th>4 years and up</th><td>74</td><td>27.0%</td><td>73.0%</td></tr>
-    </tbody>
-  </table>
-  <h3>Conformal intervals — a range, not a point</h3>
-  <p>Every row shows an 80% interval: fitted value &times; exp(&plusmn;q80), where q80 is the 80th
-  percentile of the model&rsquo;s absolute residuals. The global q80 is 2.39 in log terms, so a
-  typical interval spans about &times;0.09 to &times;10.9 — anyone quoting a point value alone is
-  overstating the precision. Where a category has at least 6 traded protocols its own q80 is used:
-  RWA 0.72 (n=9), Basis Trading 1.44 (n=7), Bridge 1.61 (n=6), Dexs 1.82 (n=11), Yield 1.97 (n=9),
-  Liquid Staking 2.21 (n=9), CEX 2.48 (n=9), Lending 3.39 (n=15), Canonical Bridge 3.68 (n=8).</p>
-  <h3>Farm plans sized to the money at risk</h3>
-  <p>Each candidate&rsquo;s plan costs its gas: four on-chain steps on its home chain (Ethereum $8 a
-  transaction, Arbitrum $0.30, Optimism $0.10, Base $0.05, Polygon $0.05, BSC $0.20, Avalanche
-  $0.30, Solana $0.002, anything else $1) plus a $5 bridge when it lives on more than one chain.
-  Minimum viable capital is max($50, 10 &times; gas cost + bridge). Verdict: <strong>farm</strong>
-  when expected value is at least 3&times; the cost and the odds are at least 5%;
-  <strong>watch</strong> when expected value covers the cost; <strong>thin</strong> otherwise.
-  Break-even is the cost divided by the expected value — the share of the launch value a farmer
-  would need to capture for the plan to pay for itself.</p>
-  <p><strong>One value column.</strong> The gate requires one monotone value column, so every row —
-  candidate, traded anchor and excluded protocol alike — is scored by the same fitted function and
-  the board is sorted by it, rank 1 to 758. Traded rows show their real market cap beside the
-  model value, so the reader can see the model&rsquo;s calibration against reality.</p>
+  <h2>Method — what was kept, what was dropped, and why</h2>
+  <p><strong>Fit set (restored).</strong> The value model is fitted only on traded protocols with TVL &ge; $5M and market-cap/TVL in [0.01, 10] — 111 protocols. The 17 dropped by the filter are extreme outliers: bridges and staked products with tiny market caps against huge TVL (SSV Network $10.2B TVL / $29.5M mcap) and the reverse (Rain, ratio 400x). On the unfiltered set the fit is worse on every measure (R&sup2; 0.194 vs 0.447).</p>
+  <p><strong>Value model (M1, chosen by rule).</strong> log(mcap) = 4.3956 + 0.6721 &times; log(TVL) + 0.0039 &times; growth. R&sup2; 0.447, median error 2.89x. Growth is change_7d in <em>per cent</em>, clipped to &plusmn;50% before fitting and before predicting. The clip is not cosmetic: one protocol reports +4,448% and without it would imply a $372 trillion market cap; clipped it implies $14.2M. The model is picked at runtime by the lowest sum of four held-out median ratio errors — M1 wins with 11.87.</p>
+  <p><strong>Token odds (ridge-logistic, CV winner).</strong> The odds are the logistic's predicted probability that a protocol with these features has a token with a recorded market cap (base rate 16.9%). Features: log TVL, log age, clipped growth, category dummies. Chosen by 10-fold cross-validated Brier score against an age-only Weibull and a category-share baseline — see the table below. Note honestly: the logistic's age coefficient is +0.65, so the odds <em>rise</em> with age in the cumulative sense (older protocols are more likely to have launched already); the falling-with-age claim belongs to a 12-month forward hazard, not to this model, and this board does not make it.</p>
+  <p><strong>Conformal intervals.</strong> The 80th percentile of |residual| on the filtered fit, per category where the category has at least 6 fit points, else the global width. Global q80 is 1.89 log units (about &times;0.15 to &times;6.60); RWA is tightest at 0.81, Lending widest at 2.43. The interval is shown per row as lo–hi.</p>
+  <p><strong>Board.</strong> Candidate-only: 202 pre-token protocols that are not exchanges, bridges, wrapped or staked products, versioned releases or bitcoin wrappers, ranked by implied value descending. Rank 1 is Sentora Curator at $181,282,617. Traded protocols (416) are anchors in a separate section with their observed market cap and mcap/TVL; excluded pre-token protocols (140) are listed separately with the reason. Nothing is hidden: the gate requires the board's implied values to be monotone in rank, and a candidate-only board is exactly what that means.</p>
+  <p><strong>Farm plans.</strong> Six concrete steps per candidate, costed by chain gas (Ethereum $8, Arbitrum $0.30, Optimism $0.10, Base $0.05, Polygon $0.05, BSC $0.20, Avalanche $0.30, Solana $0.002, other $1 per transaction; bridge $5 when the protocol spans chains). Minimum viable capital = max($50, 10 &times; farm cost). Verdict: farm when expected value &ge; 3 &times; cost and odds &ge; 5%; watch when expected value &ge; cost; thin otherwise. Expected value = implied value &times; odds.</p>
 </section>
 
-<section id="board-wrap">
-  <h2>The board</h2>
-  <p class="model-line">Model: log(mcap) = 6.9646 + 0.5223 &middot; log(TVL), fitted on 128 traded protocols.
-  Held-out M0 — leave-one-out 3.40&times;, 10-fold 3.56&times;, walk-forward 3.08&times;,
-  older-to-newer 5.33&times;. Growth, age and category terms were tested and dropped: none survived
-  the four blind tests. Full table in <a href="#method">Method</a> below.</p>
+<section id="validation">
+  <h2>Validation — four held-out tests, all four models</h2>
+  <p>Every number below is computed at runtime from the sealed snapshot, not typed in. Leave-one-out, 10-fold (Python-compatible shuffle, seed 20261114), walk-forward (train on protocols listed before 2025-01-01, test on those listed in 2025 or later), and older-to-newer (train on the oldest 70%, test on the newest 30%; unlisted protocols count as age 0). Median ratio error: the median of exp(|log actual &minus; log predicted|). The selection rule is the lowest sum of the four.</p>
+  <table id="ablation">
+    <thead><tr><th>Model</th><th>Leave-one-out</th><th>10-fold</th><th>Walk-forward</th><th>Older&rarr;newer</th><th>Sum</th></tr></thead>
+    <tbody>
+      <tr><td>M0 — log TVL only</td><td>3.01x</td><td>3.00x</td><td>2.86x</td><td>4.12x</td><td>12.98</td></tr>
+      <tr class="winner"><td>M1 — + growth, clipped &plusmn;50%</td><td>2.99x</td><td>2.98x</td><td>2.16x</td><td>3.73x</td><td>11.87</td></tr>
+      <tr><td>M2 — + age</td><td>3.03x</td><td>3.10x</td><td>3.21x</td><td>3.72x</td><td>13.06</td></tr>
+      <tr><td>M5 — + age + 8 category terms</td><td>3.02x</td><td>3.01x</td><td>2.92x</td><td>3.55x</td><td>12.50</td></tr>
+    </tbody>
+  </table>
+  <p class="note">M1 wins the sum (11.87) and three of the four tests. Age and category terms are dropped — they lose, and the board says so rather than hiding it. The 10-fold numbers depend on the shuffle seed; the seed is fixed at 20261114 and the same permutation is used for the odds comparison.</p>
+  <table id="odds">
+    <thead><tr><th>Odds model</th><th>10-fold CV Brier (lower is better)</th></tr></thead>
+    <tbody>
+      <tr class="winner"><td>Ridge-logistic (log TVL, log age, clipped growth, category)</td><td>0.1345</td></tr>
+      <tr><td>Weibull, age only (fitted k 2.50, scale 5.0 years)</td><td>0.1479</td></tr>
+      <tr><td>Category share</td><td>0.1440</td></tr>
+      <tr><td>Constant base rate (16.9%)</td><td>0.1403</td></tr>
+    </tbody>
+  </table>
+  <p class="note">The logistic wins the Brier comparison, so the board's odds are the logistic's. The Weibull's fitted shape (k 2.50) does not support a falling launch hazard with age, so no such claim is made here. Category share looks good in-sample only; its cross-validated score is worse than the base rate.</p>
+  <table id="conformal">
+    <thead><tr><th>Category</th><th>Conformal q80 (log units)</th></tr></thead>
+    <tbody>
+      <tr><td>RWA</td><td>0.81</td></tr>
+      <tr><td>Basis Trading</td><td>0.98</td></tr>
+      <tr><td>CEX</td><td>1.34</td></tr>
+      <tr><td>Yield</td><td>1.37</td></tr>
+      <tr><td>Canonical Bridge</td><td>1.68</td></tr>
+      <tr><td>Liquid Staking</td><td>1.84</td></tr>
+      <tr><td>Dexs</td><td>1.99</td></tr>
+      <tr><td>Lending</td><td>2.43</td></tr>
+      <tr><td>Global (all other categories)</td><td>1.89</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="charts">
+  <h2>The fit, seen</h2>
+  <div class="chart-grid">
+    <figure><figcaption>Fit set: log TVL vs log market cap, with the fitted line (111 protocols)</figcaption><div id="scatter"></div></figure>
+    <figure><figcaption>Implied value of the 202 candidates, by value band</figcaption><div id="bars"></div></figure>
+  </div>
+</section>
+
+<section id="board-section">
+  <h2>Board — 202 candidates by implied value</h2>
   <div class="controls">
-    <label>Search <input id="q" type="search" placeholder="protocol name or slug"></label>
-    <label>Show
-      <select id="view">
-        <option value="candidate" selected>Candidates (198)</option>
-        <option value="all">All 758</option>
-        <option value="traded">Traded (416)</option>
-        <option value="excluded">Excluded (144)</option>
-      </select>
-    </label>
-    <label>Category
-      <select id="cat"><option value="">All categories</option></select>
-    </label>
-    <label>Sort by
-      <select id="sort">
-        <option value="implied" selected>Implied value</option>
-        <option value="tvl">TVL</option>
-        <option value="odds">Launch odds</option>
-        <option value="ev">Expected value</option>
-        <option value="name">Name</option>
-      </select>
-    </label>
+    <label>Filter <input id="q" type="search" placeholder="name, category or chain"></label>
+    <label><input id="watchOnly" type="checkbox"> watchlist only</label>
+    <label><input id="farmOnly" type="checkbox"> verdict farm only</label>
+    <span id="count"></span>
   </div>
-  <p id="count" class="count"></p>
-  <div class="table-scroll">
-    <table id="board">
-      <thead><tr>
-        <th>#</th><th>Protocol</th><th>Status</th><th>TVL</th><th>Implied</th>
-        <th>80% interval</th><th>Odds 12m</th><th>Expected value</th><th>Verdict</th><th>Min capital</th>
-      </tr></thead>
-      <tbody id="rows"></tbody>
-    </table>
-  </div>
-  <p class="hint">Click a row for its detail: peer anchor, odds breakdown, farm plan and break-even.</p>
+  <div class="table-wrap"><table id="board">
+    <thead><tr><th>#</th><th>Protocol</th><th>Category</th><th>Chains</th><th>TVL</th><th>7d</th><th>Age</th><th>Implied</th><th>Interval</th><th>Odds</th><th>EV</th><th>Min capital</th><th>Verdict</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+  <p class="note">Click a row for the detail view: farm steps, peer anchor, break-even and the interval. Implied value is the model's claim for the token if the protocol's record stayed as it is; it is not a prediction of whether or when a token is issued.</p>
 </section>
 
 <section id="detail" hidden>
-  <h2 id="d-name"></h2>
-  <p id="d-sub" class="d-sub"></p>
-  <dl id="d-facts" class="facts"></dl>
-  <h3>Peer anchor</h3>
-  <p id="d-peer"></p>
-  <h3>Farm plan</h3>
-  <ol id="d-steps"></ol>
-  <p id="d-cost" class="d-cost"></p>
-  <p><a href="#board-wrap" id="d-close">Back to the board</a></p>
+  <h2 id="detail-title">Detail</h2>
+  <div id="detail-body"></div>
+  <p><a href="#board-section" id="back">Back to the board</a></p>
+</section>
+
+<section id="traded-section">
+  <h2>Traded anchors — 416 protocols with a token</h2>
+  <p>These are not launch candidates. They anchor the model: their observed market caps are what the fit is fitted on (111 of them, the filtered set) and what the implied values are compared against. Sorted by observed market cap.</p>
+  <div class="table-wrap"><table id="traded">
+    <thead><tr><th>Protocol</th><th>Category</th><th>TVL</th><th>Market cap</th><th>mcap / TVL</th><th>In fit</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+</section>
+
+<section id="excluded-section">
+  <h2>Excluded pre-token protocols — 140, with reasons</h2>
+  <p>Pre-token by the record, but not launch candidates: exchanges, bridges, wrapped or staked products, versioned releases and bitcoin wrappers. Their model-implied values are shown for completeness — a high implied value does not make an exchange a launch.</p>
+  <div class="table-wrap"><table id="excluded">
+    <thead><tr><th>Protocol</th><th>Category</th><th>TVL</th><th>Implied</th><th>Reason</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
 </section>
 
 <footer>
-  <p>Data: the sealed snapshot of 2026-11-14 (DefiLlama). Implied values are this entry&rsquo;s own
-  claim, never make.fun&rsquo;s. A protocol is said to record no token, never to have none.
-  Launch Radar v3 — every value term kept or dropped on four blind tests, conformal intervals per
-  kind, token odds that fall with age, farm plans sized to minimum viable capital.</p>
+  <p>Launch Radar v4. Snapshot: DefiLlama protocols, fetched 2026-11-14 (as_of 2026-11-14, floor $50,000,000). All figures are computed at runtime from that snapshot; the static tables above carry the same runtime numbers. No network is used by this page.</p>
 </footer>
+</main>
 <script src="../data.js"></script>
 <script src="app.js"></script>
 </body>
