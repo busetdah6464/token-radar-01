@@ -1,136 +1,211 @@
-// app.js — renders the Launch Radar board, detail view, filters and charts.
-// Reads window.RADAR (data.js, written by main.ts from the snapshot).
-// No network: every number on this page comes from that one file.
-const RADAR = window.RADAR;
-const fmt = (n) => n >= 1e9 ? '$' + (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? '$' + (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? '$' + (n / 1e3).toFixed(1) + 'K' : '$' + Math.round(n).toLocaleString('en-US');
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const params = new URLSearchParams(location.search);
+// Launch Radar v3 dashboard: sorts, filters and details the board main.ts wrote.
+// The data comes from ../data.js (window.LAUNCH_RADAR_V3), written by the same run.
+(function () {
+  var D = window.LAUNCH_RADAR_V3;
+  var rows = D.rows;
+  function $(id) { return document.getElementById(id); }
 
-function fillSelect(id, values) {
-  const el = document.getElementById(id);
-  [...new Set(values)].sort().forEach((v) => {
-    const o = document.createElement('option'); o.value = v; o.textContent = v; el.appendChild(o);
-  });
-}
-fillSelect('cat', RADAR.rows.map((r) => r.category).filter(Boolean));
-fillSelect('chain', RADAR.rows.flatMap((r) => r.chains));
+  /** Short money: $12.4M, $836K, $512. */
+  function money(x) {
+    if (x === null || x === undefined) return '—';
+    if (x >= 1e9) return '$' + (x / 1e9).toFixed(2) + 'B';
+    if (x >= 1e6) return '$' + (x / 1e6).toFixed(1) + 'M';
+    if (x >= 1e3) return '$' + (x / 1e3).toFixed(0) + 'K';
+    return '$' + x.toFixed(0);
+  }
+  function moneyFull(x) {
+    if (x === null || x === undefined) return '—';
+    return '$' + Math.round(x).toLocaleString('en-US');
+  }
+  function pct(x) {
+    if (x === null || x === undefined) return '—';
+    return (x * 100).toFixed(1) + '%';
+  }
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
 
-const meta = RADAR.meta, ab = meta.ablation, win = meta.model_winner;
-document.getElementById('kpis').innerHTML =
-  '<div class="kpi"><b>' + RADAR.rows.length + '</b><span>launch candidates ranked</span></div>' +
-  '<div class="kpi"><b>' + RADAR.watchlist_size + '</b><span>on the watchlist — all covered</span></div>' +
-  '<div class="kpi"><b>' + fmt(RADAR.rows[0].implied_value_usd) + '</b><span>top implied value: ' + esc(RADAR.rows[0].name) + ' (rank #1)</span></div>' +
-  '<div class="kpi"><b>' + ab[win].loo + '%</b><span>median held-out error, leave-one-out</span></div>' +
-  '<div class="kpi"><b>' + ab[win].wf_half + '%</b><span>median held-out error, walk-forward</span></div>' +
-  '<div class="kpi"><b>' + RADAR.as_of + '</b><span>snapshot date (sealed)</span></div>';
+  /** State: view, category, query, sort, and the open detail slug. */
+  var state = { view: 'candidate', cat: '', q: '', sort: 'implied', detail: null };
 
-// Methodology + the full ablation table, so the judge sees every term
-// that was tested and which ones were dropped, with the numbers as-is.
-const abRows = Object.keys(ab).map((m) =>
-  '<tr' + (m === win ? ' class="winner"' : '') + '><td>' + m + '</td><td>' + ab[m].loo + '%</td><td>' + ab[m].wf_half + '%</td><td>' + ab[m].wf_two_thirds + '%</td><td>' + ab[m].tenfold + '%</td><td>' + ab[m].sum + '</td></tr>').join('');
-document.getElementById('validation').innerHTML =
-  '<h2>How the value is modelled — and how it was tested</h2>' +
-  '<p><b>Model (' + win + '):</b> ' + esc(meta.model) + ' ' + esc(meta.method) + '</p>' +
-  '<p><b>Token odds:</b> ' + esc(meta.token_odds.method) + ' Median ten-fold Brier score <b>' + meta.token_odds.tenfold_brier + '</b> against <b>' + meta.token_odds.baseline_tenfold_brier + '</b> for the category-share baseline it replaces (lower is better).</p>' +
-  '<table class="ablation"><thead><tr><th>Model</th><th>Leave-one-out</th><th>Walk-forward (half)</th><th>Walk-forward (2/3)</th><th>Ten-fold</th><th>Sum (pick)</th></tr></thead><tbody>' + abRows + '</tbody></table>' +
-  '<p class="fine">M0 category geo-median (the old model) · M1 log-log on TVL · M2 + category intercepts · M3 + log age · M4 + 7-day growth · M5 + size curve. ' + esc(meta.ablation_note) + ' Median absolute % error on the traded protocols’ observed market caps; the winner is picked by the lowest sum of the three blind splits. Ratios are wide — the multiple is a median, not a precise price.</p>' +
-  '<p class="fine"><b>Farm plans:</b> ' + esc(meta.farm) + '</p>';
+  /** Read #view=..&cat=..&sort=..&q=..&detail=.. from the URL hash. */
+  function readHash() {
+    var h = location.hash.replace(/^#/, '');
+    if (!h) return;
+    var parts = h.split('&');
+    for (var i = 0; i < parts.length; i++) {
+      var kv = parts[i].split('=');
+      var k = decodeURIComponent(kv[0] || '');
+      var v = decodeURIComponent(kv[1] || '');
+      if (k === 'view' && (v === 'candidate' || v === 'all' || v === 'traded' || v === 'excluded')) state.view = v;
+      if (k === 'cat') state.cat = v;
+      if (k === 'sort') state.sort = v;
+      if (k === 'q') state.q = v;
+      if (k === 'detail') state.detail = v;
+    }
+  }
 
-function ageTxt(r) {
-  if (r.age_days == null) return '—';
-  if (r.age_days < 365) return Math.max(1, Math.round(r.age_days / 30.44)) + ' mo';
-  return (r.age_days / 365).toFixed(1) + ' y';
-}
-const SORTS = {
-  rank: (a, b) => a.rank - b.rank,
-  expected: (a, b) => b.expected_value_usd - a.expected_value_usd,
-  odds: (a, b) => b.token_odds - a.token_odds,
-  tvl: (a, b) => b.tvl_usd - a.tvl_usd,
-  age: (a, b) => (b.age_days || 0) - (a.age_days || 0),
-};
-function render() {
-  const q = (document.getElementById('q').value || '').toLowerCase();
-  const cat = document.getElementById('cat').value;
-  const chain = document.getElementById('chain').value;
-  const verdict = document.getElementById('verdict').value;
-  const sort = document.getElementById('sort').value;
-  const watch = document.getElementById('watch').checked;
-  const rows = RADAR.rows.filter((r) =>
-    (!q || r.name.toLowerCase().includes(q) || r.slug.includes(q)) &&
-    (!cat || r.category === cat) && (!chain || r.chains.includes(chain)) &&
-    (!verdict || r.farm_verdict === verdict) && (!watch || r.on_watchlist))
-    .sort(SORTS[sort] || SORTS.rank);
-  document.getElementById('rows').innerHTML = rows.map((r) =>
-    '<tr data-slug="' + r.slug + '"><td>' + r.rank + '</td><td><b>' + esc(r.name) + '</b><br><small>' + esc(r.slug) + '</small></td><td>' + esc(r.category || '') + '</td><td>' + r.chains.slice(0, 3).map(esc).join(', ') + '</td><td>' + fmt(r.tvl_usd) + '</td><td class="' + (r.change_7d >= 0 ? 'pos' : 'neg') + '">' + (r.change_7d == null ? '—' : (r.change_7d >= 0 ? '+' : '') + r.change_7d.toFixed(1) + '%') + '</td><td>' + ageTxt(r) + '</td><td>' + r.implied_multiple + 'x</td><td><b>' + fmt(r.implied_value_usd) + '</b></td><td>' + Math.round(r.token_odds * 100) + '%</td><td>' + fmt(r.expected_value_usd) + '</td><td class="v-' + r.farm_verdict.replace(' ', '-') + '">' + r.farm_verdict + '</td><td>' + (r.on_watchlist ? '★' : '') + '</td></tr>').join('');
-  document.getElementById('count').textContent = rows.length + ' of ' + RADAR.rows.length + ' candidates shown.';
-  document.querySelectorAll('#rows tr').forEach((tr) => tr.addEventListener('click', () => showDetail(tr.dataset.slug)));
-}
+  /** Rows for the current filter, sorted as chosen. */
+  function currentRows() {
+    var list = rows.filter(function (r) {
+      if (state.view !== 'all' && r.status !== state.view) return false;
+      if (state.cat && r.category !== state.cat) return false;
+      if (state.q) {
+        var q = state.q.toLowerCase();
+        if (r.name.toLowerCase().indexOf(q) < 0 && r.slug.toLowerCase().indexOf(q) < 0) return false;
+      }
+      return true;
+    });
+    var key = state.sort;
+    list.sort(function (a, b) {
+      if (key === 'name') return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+      if (key === 'tvl') return b.tvl_usd - a.tvl_usd;
+      if (key === 'odds') return (b.odds_12m || -1) - (a.odds_12m || -1);
+      if (key === 'ev') return (b.ev_usd || -1) - (a.ev_usd || -1);
+      return b.implied_value_usd - a.implied_value_usd;
+    });
+    return list;
+  }
 
-function showDetail(slug) {
-  const r = RADAR.rows.find((x) => x.slug === slug);
-  if (!r) return;
-  document.getElementById('detail').hidden = false;
-  document.getElementById('detail-name').textContent = '#' + r.rank + ' ' + r.name + ' — ' + fmt(r.implied_value_usd) + ' implied value';
-  document.getElementById('detail-body').innerHTML =
-    '<p>Category: ' + esc(r.category || '—') + ' · Chains: ' + r.chains.map(esc).join(', ') + ' · TVL ' + fmt(r.tvl_usd) +
-    ' · 7-day change ' + (r.change_7d == null ? 'unreported' : (r.change_7d >= 0 ? '+' : '') + r.change_7d.toFixed(1) + '%') +
-    ' · Age ' + ageTxt(r) + ' with no token · Implied value ' + fmt(r.implied_value_usd) + ' at ' + r.implied_multiple + 'x · Token odds ' + Math.round(r.token_odds * 100) + '% · Expected value ' + fmt(r.expected_value_usd) +
-    ' · Watchlist: ' + (r.on_watchlist ? 'yes' : 'no') + ' · Launch candidate: yes</p>' +
-    '<p><b>How the numbers are built:</b> ' + esc(meta.model.replace(/^Implied value = /, 'implied value = ').replace(/\.$/, '')) + ' on a TVL of ' + fmt(r.tvl_usd) + '. Token odds come from the logistic model (log TVL, log age, 7-day growth, category). Expected value = implied × odds. Farm verdict <b>' + r.farm_verdict + '</b> from quartiles of expected value per dollar of gas.</p>' +
-    '<p>' + esc(r.note) + '</p>' +
-    '<h3>Farm steps — deposit tiers $100 / $1,000 / $10,000, about $' + r.farm_gas_usd.toFixed(2) + ' of gas in total</h3><ol>' + r.farm_steps.map((s) => '<li>' + esc(s) + '</li>').join('') + '</ol>';
-  document.getElementById('detail').scrollIntoView();
-}
+  /** Render the board table for the current state. */
+  function render() {
+    var list = currentRows();
+    var tb = $('rows');
+    var html = '';
+    for (var i = 0; i < list.length; i++) {
+      var r = list[i];
+      var odds = r.odds_12m === null ? '—' : pct(r.odds_12m);
+      var ev = r.ev_usd === null ? '—' : money(r.ev_usd);
+      var cap = r.min_capital_usd === null ? '—' : money(r.min_capital_usd);
+      var vclass = r.verdict === 'farm' ? 'v-farm' : r.verdict === 'watch' ? 'v-watch' : r.verdict === 'thin' ? 'v-thin' : '';
+      html += '<tr data-slug="' + esc(r.slug) + '">'
+        + '<td>' + (i + 1) + '</td>'
+        + '<td><strong>' + esc(r.name) + '</strong><br><span style="color:var(--muted);font-size:12px">' + esc(r.slug) + ' · board #' + r.rank + '</span></td>'
+        + '<td><span class="badge ' + r.status + '">' + r.status + '</span></td>'
+        + '<td>' + money(r.tvl_usd) + '</td>'
+        + '<td>' + money(r.implied_value_usd) + '</td>'
+        + '<td>' + money(r.lo_usd) + ' – ' + money(r.hi_usd) + '</td>'
+        + '<td>' + odds + '</td>'
+        + '<td>' + ev + '</td>'
+        + '<td class="' + vclass + '">' + r.verdict + '</td>'
+        + '<td>' + cap + '</td></tr>';
+    }
+    tb.innerHTML = html;
+    $('count').textContent = list.length + ' rows shown · ' + rows.length + ' on the board · click a row for its detail.';
+  }
 
-// Charts: top-10 implied values (bars) and TVL vs implied value (scatter,
-// log scales; watchlist rows in amber, the rest in slate).
-(function charts() {
-  const top = RADAR.rows.slice(0, 10);
-  const max = top[0].implied_value_usd;
-  document.getElementById('chart-bars').innerHTML = '<h3>Top 10 by implied value</h3>' +
-    top.map((r) => '<div class="bar-row"><span class="bar-label">' + esc(r.name) + '</span><div class="bar-track"><div class="bar-fill" style="width:' + (r.implied_value_usd / max * 100).toFixed(1) + '%"></div></div><span class="bar-val">' + fmt(r.implied_value_usd) + '</span></div>').join('');
-  const W = 640, H = 300, P = 34;
-  const xs = RADAR.rows.map((r) => Math.log10(r.tvl_usd)), ys = RADAR.rows.map((r) => Math.log10(r.implied_value_usd));
-  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
-  const px = (v) => P + (v - x0) / (x1 - x0) * (W - 2 * P);
-  const py = (v) => H - P - (v - y0) / (y1 - y0) * (H - 2 * P);
-  const dots = RADAR.rows.map((r) => '<circle cx="' + px(Math.log10(r.tvl_usd)).toFixed(1) + '" cy="' + py(Math.log10(r.implied_value_usd)).toFixed(1) + '" r="' + (r.on_watchlist ? 5 : 3) + '" class="' + (r.on_watchlist ? 'dot-watch' : 'dot') + '"><title>' + esc(r.name) + ' — TVL ' + fmt(r.tvl_usd) + ', implied ' + fmt(r.implied_value_usd) + '</title></circle>').join('');
-  document.getElementById('chart-scatter').innerHTML = '<h3>TVL vs implied value (log scales; amber = watchlist)</h3>' +
-    '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Scatter of TVL against implied value">' +
-    '<line x1="' + P + '" y1="' + (H - P) + '" x2="' + (W - P) + '" y2="' + (H - P) + '" class="axis"/><line x1="' + P + '" y1="' + P + '" x2="' + P + '" y2="' + (H - P) + '" class="axis"/>' +
-    '<text x="' + (W / 2) + '" y="' + (H - 6) + '" class="axis-label">TVL (log)</text><text x="10" y="' + (H / 2) + '" class="axis-label" transform="rotate(-90 10 ' + (H / 2) + ')">Implied value (log)</text>' + dots + '</svg>';
-})();
+  /** Fill and show the detail panel for one protocol. */
+  function showDetail(slug) {
+    var r = null;
+    for (var i = 0; i < rows.length; i++) if (rows[i].slug === slug) { r = rows[i]; break; }
+    if (!r) return;
+    state.detail = slug;
+    $('d-name').textContent = r.name;
+    var sub = 'Board rank #' + r.rank + ' of ' + rows.length + ' · ' + r.status
+      + (r.on_watchlist ? ' · on the watchlist' : '')
+      + ' · ' + (r.category === null ? 'no category' : r.category)
+      + ' · ' + r.chains.join(', ');
+    $('d-sub').textContent = sub;
+    var facts = [
+      ['TVL', moneyFull(r.tvl_usd)],
+      ['Implied value', moneyFull(r.implied_value_usd)],
+      ['80% interval', money(r.lo_usd) + ' – ' + money(r.hi_usd)],
+      ['Market cap (actual)', r.mcap_usd === null ? 'records no token' : moneyFull(r.mcap_usd)],
+      ['Age', r.age_years.toFixed(2) + ' years'],
+      ['Launch odds (12m)', pct(r.odds_12m)],
+      ['Expected value', r.ev_usd === null ? '—' : moneyFull(r.ev_usd)],
+      ['Verdict', r.verdict],
+      ['Min capital', r.min_capital_usd === null ? '—' : money(r.min_capital_usd)],
+      ['Gas cost', '$' + r.gas_cost_usd.toFixed(2)],
+      ['Break-even', r.break_even_x === null ? '—' : (r.break_even_x * 100).toFixed(3) + '% of expected value'],
+      ['7-day TVL change', r.change_7d === null ? 'unreported' : r.change_7d.toFixed(1) + '%'],
+    ];
+    var fh = '';
+    for (var j = 0; j < facts.length; j++) {
+      fh += '<div><dt>' + esc(facts[j][0]) + '</dt><dd>' + esc(facts[j][1]) + '</dd></div>';
+    }
+    $('d-facts').innerHTML = fh;
+    if (r.peer) {
+      $('d-peer').textContent = 'Nearest traded anchor: ' + r.peer.name + ' — market cap '
+        + moneyFull(r.peer.mcap_usd) + ' on TVL ' + moneyFull(r.peer.tvl_usd)
+        + '. The model was fitted on 128 such anchors; this is the closest one in the same category and size.';
+    } else {
+      $('d-peer').textContent = 'No traded anchor in this category.';
+    }
+    var sh = '';
+    for (var k = 0; k < r.farm_steps.length; k++) sh += '<li>' + esc(r.farm_steps[k]) + '</li>';
+    $('d-steps').innerHTML = sh;
+    if (r.status === 'candidate') {
+      $('d-cost').textContent = 'Plan cost: $' + r.gas_cost_usd.toFixed(2)
+        + ' of gas and bridge, minimum viable capital ' + money(r.min_capital_usd)
+        + '. Verdict ' + r.verdict + ': expected value ' + moneyFull(r.ev_usd)
+        + ' against a cost of $' + r.gas_cost_usd.toFixed(2) + '.';
+    } else if (r.status === 'traded') {
+      $('d-cost').textContent = 'No launch to farm: this protocol already trades. The plan above is participation, not a farm.';
+    } else {
+      $('d-cost').textContent = 'Excluded from the candidate board: ' + (r.excluded_reason || 'rule') + '.';
+    }
+    $('detail').hidden = false;
+    $('detail').scrollIntoView();
+  }
 
-// Already trading: the model is fitted on these, and they are never ranked.
-let tradedAll = false;
-function renderTraded() {
-  const list = tradedAll ? RADAR.traded : RADAR.traded.slice(0, 20);
-  document.getElementById('traded-rows').innerHTML = list.map((t) =>
-    '<tr><td><b>' + esc(t.name) + '</b><br><small>' + esc(t.slug) + '</small></td><td>' + esc(t.category || '') + '</td><td>' + fmt(t.tvl_usd) + '</td><td>' + (t.mcap_usd ? fmt(t.mcap_usd) : '—') + '</td><td>' + (t.multiple == null ? '—' : t.multiple + 'x') + '</td></tr>').join('');
-  document.getElementById('traded-more').textContent = tradedAll ? 'Show fewer' : 'Show all ' + RADAR.traded.length;
-}
-document.getElementById('traded-note').textContent =
-  RADAR.traded.length + ' protocols in the snapshot already record a token, so they are not launches and are never ranked above. Their observed market caps are the data the value model is fitted on (111 of them with a usable mcap/TVL ratio). ' +
-  RADAR.noncandidate_count + ' further no-token protocols are bridges, exchanges or staked products of a token that already trades, so they are not ranked either.';
-document.getElementById('traded-more').addEventListener('click', () => { tradedAll = !tradedAll; renderTraded(); });
-renderTraded();
+  /** Fill the category filter from the data. */
+  function fillCategories() {
+    var cats = {};
+    for (var i = 0; i < rows.length; i++) {
+      var c = rows[i].category;
+      if (c !== null) cats[c] = (cats[c] || 0) + 1;
+    }
+    var names = Object.keys(cats).sort();
+    var sel = $('cat');
+    for (var j = 0; j < names.length; j++) {
+      var opt = document.createElement('option');
+      opt.value = names[j];
+      opt.textContent = names[j] + ' (' + cats[names[j]] + ')';
+      sel.appendChild(opt);
+    }
+  }
 
-document.getElementById('integrity').innerHTML =
-  '<h2>Integrity — screenshots and code agree</h2>' +
-  '<p>Snapshot: ' + esc(RADAR.source) + ' · as of ' + RADAR.as_of + ' · floor ' + fmt(RADAR.floor_usd) + ' · ' + RADAR.protocols_in_snapshot + ' protocols · watchlist ' + RADAR.watchlist_size + ' (all ' + RADAR.watchlist_size + ' covered by the board) · ' + RADAR.rows.length + ' launch candidates ranked · ' + RADAR.traded.length + ' already trading · ' + RADAR.noncandidate_count + ' non-candidates excluded with reason. ' +
-  'The board is written by main.ts from the sealed snapshot at run time — the same code that writes this page — so what you see here is what the program produced, not a hand-made table. Farm steps name their cost and time; gas figures are typical per-transaction costs for the chain, and they move with network load. Nothing on this page fetches the network.</p>';
+  /** Push the current state into the URL hash (so views are linkable). */
+  function writeHash() {
+    var parts = ['view=' + encodeURIComponent(state.view)];
+    if (state.cat) parts.push('cat=' + encodeURIComponent(state.cat));
+    if (state.sort !== 'implied') parts.push('sort=' + encodeURIComponent(state.sort));
+    if (state.q) parts.push('q=' + encodeURIComponent(state.q));
+    if (state.detail) parts.push('detail=' + encodeURIComponent(state.detail));
+    history.replaceState(null, '', '#' + parts.join('&'));
+  }
 
-['q', 'cat', 'chain', 'verdict', 'sort', 'watch'].forEach((id) => document.getElementById(id).addEventListener('input', render));
-document.querySelectorAll('#board thead th[data-k]').forEach((th) => th.addEventListener('click', () => {
-  const k = th.dataset.k;
-  const map = { rank: 'rank', name: 'rank', category: 'rank', tvl: 'tvl', change: 'rank', age: 'age', multiple: 'rank', implied: 'rank', odds: 'odds', expected: 'expected', verdict: 'rank' };
-  document.getElementById('sort').value = map[k] || 'rank';
+  function bind() {
+    $('q').addEventListener('input', function (e) { state.q = e.target.value; render(); writeHash(); });
+    $('view').addEventListener('change', function (e) { state.view = e.target.value; state.detail = null; $('detail').hidden = true; render(); writeHash(); });
+    $('cat').addEventListener('change', function (e) { state.cat = e.target.value; render(); writeHash(); });
+    $('sort').addEventListener('change', function (e) { state.sort = e.target.value; render(); writeHash(); });
+    $('rows').addEventListener('click', function (e) {
+      var tr = e.target.closest('tr');
+      if (tr && tr.getAttribute('data-slug')) { showDetail(tr.getAttribute('data-slug')); writeHash(); }
+    });
+    $('d-close').addEventListener('click', function () { state.detail = null; $('detail').hidden = true; writeHash(); });
+    window.addEventListener('hashchange', function () {
+      state.detail = null;
+      readHash();
+      syncControls();
+      render();
+      if (state.detail) showDetail(state.detail);
+    });
+  }
+
+  function syncControls() {
+    $('view').value = state.view;
+    $('cat').value = state.cat;
+    $('sort').value = state.sort;
+    $('q').value = state.q;
+  }
+
+  readHash();
+  fillCategories();
+  syncControls();
+  bind();
   render();
-}));
-if (params.get('category')) { document.getElementById('cat').value = params.get('category'); }
-if (params.get('chain')) { document.getElementById('chain').value = params.get('chain'); }
-if (params.get('verdict')) { document.getElementById('verdict').value = params.get('verdict'); }
-if (params.get('sort')) { document.getElementById('sort').value = params.get('sort'); }
-if (params.get('watch')) { document.getElementById('watch').checked = true; }
-render();
-if (params.get('slug')) showDetail(params.get('slug'));
+  if (state.detail) showDetail(state.detail);
+})();

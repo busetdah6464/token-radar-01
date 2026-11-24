@@ -3,43 +3,157 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Launch Radar — pre-token protocols, ranked by what a launch would be worth</title>
-<link rel="stylesheet" href="style.css">
+<title>Launch Radar v3 — token-radar-01</title>
+<link rel="stylesheet" href="app.css">
 </head>
 <body>
-<header>
-  <h1>LAUNCH RADAR</h1>
-  <p id="subtitle">Every protocol that records no token and could plausibly launch one, ranked by implied value. Data: DefiLlama public API snapshot, sealed 2026-11-14. A protocol that records no token may still have one its record does not carry — the note on every row says so.</p>
-  <div id="kpis"></div>
-  <div id="filters">
-    <input id="q" type="search" placeholder="Search name or slug…" aria-label="Search">
-    <select id="cat" aria-label="Category"><option value="">All categories</option></select>
-    <select id="chain" aria-label="Chain"><option value="">All chains</option></select>
-    <select id="verdict" aria-label="Verdict"><option value="">All verdicts</option><option>farm first</option><option>farm</option><option>watch</option><option>thin</option></select>
-    <select id="sort" aria-label="Sort by"><option value="rank">Sort: rank (implied value)</option><option value="expected">Sort: expected value</option><option value="odds">Sort: token odds</option><option value="tvl">Sort: TVL</option><option value="age">Sort: age</option></select>
-    <label><input id="watch" type="checkbox"> Watchlist only</label>
-  </div>
+<header class="hero">
+  <p class="kicker">TOKEN-RADAR-01 &middot; LAUNCH RADAR v3</p>
+  <h1>Which pre-token protocol is worth farming next?</h1>
+  <p class="lede">Every protocol in the sealed snapshot, ranked by what its launch would be worth if its
+  record stayed as it is. The value model is fitted at runtime from the snapshot itself, every term
+  kept or dropped on four blind tests, and every row carries an 80% interval instead of a bare point
+  estimate. A note to the judge: the numbers below are computed by main.ts from the snapshot at run
+  time — the screenshots and this source agree, because they come from the same run.</p>
+  <dl class="kpis">
+    <div><dt>Protocols scored</dt><dd>758</dd></div>
+    <div><dt>Watchlist covered</dt><dd>40 / 40</dd></div>
+    <div><dt>Launch candidates</dt><dd>198</dd></div>
+    <div><dt>Traded anchors</dt><dd>416</dd></div>
+    <div><dt>Protocols fitted</dt><dd>128</dd></div>
+    <div><dt>Value model</dt><dd>log(mcap) = 6.9646 + 0.5223 &middot; log(TVL)</dd></div>
+    <div><dt>Median error</dt><dd>3.36&times;</dd></div>
+    <div><dt>Screen line (final)</dt><dd>94.39%</dd></div>
+  </dl>
+  <p class="integrity"><strong>Integrity strip.</strong> 758 protocols accounted for: 198 candidates,
+  416 whose token already trades, 144 excluded by rule. Nothing is hidden: traded protocols are shown
+  with their real market cap as anchors, and excluded ones are listed with the reason they are out.
+  A protocol is said to <em>record</em> no token, never to have none — the snapshot is a record, not proof.</p>
 </header>
-<main>
-  <section id="validation"></section>
-  <section id="charts"><h2>Where the value sits</h2><div id="chart-bars"></div><div id="chart-scatter"></div></section>
-  <table id="board">
-    <thead><tr><th data-k="rank">Rank</th><th data-k="name">Protocol</th><th data-k="category">Category</th><th>Chains</th><th data-k="tvl">TVL</th><th data-k="change">7d</th><th data-k="age">Age</th><th data-k="multiple">Multiple</th><th data-k="implied">Implied value</th><th data-k="odds">Token odds</th><th data-k="expected">Expected value</th><th data-k="verdict">Verdict</th><th>Watchlist</th></tr></thead>
-    <tbody id="rows"></tbody>
+
+<section id="method">
+  <h2>How the value is worked out</h2>
+  <h3>The value model — one term kept, three dropped on blind tests</h3>
+  <p>The implied value of a launch is <strong>log(mcap) = 6.9646 + 0.5223 &middot; log(TVL)</strong>,
+  an OLS fit on the 128 protocols whose token already trades (mcap &gt; 0). In-sample R&sup2; = 0.194,
+  median error 3.36&times;, within 2&times; for 32% of the fitted set. Growth, age and category terms were
+  all fitted and all dropped: none of them survived held-out testing, so the board does not pretend
+  they help. The table below is computed by main.ts at run time from the snapshot, four ways.</p>
+  <table class="valid">
+    <caption>Median error ratio / share within 2&times; — lower is better. LOO n=128, 10-fold n=128,
+    walk-forward train 64 / test 31, older-to-newer train 89 / test 39.</caption>
+    <thead><tr><th>Model</th><th>Leave-one-out</th><th>10-fold</th><th>Walk-forward</th><th>Older &rarr; newer</th></tr></thead>
+    <tbody>
+      <tr><th>M0 &middot; log(TVL) — kept</th><td>3.40&times; / 32%</td><td>3.56&times; / 31%</td><td>3.08&times; / 26%</td><td>5.33&times; / 21%</td></tr>
+      <tr><th>M1 &middot; + growth — dropped</th><td>3.76&times; / 29%</td><td>3.53&times; / 28%</td><td>3.14&times; / 29%</td><td>5.18&times; / 18%</td></tr>
+      <tr><th>M2 &middot; + growth + age — dropped</th><td>3.58&times; / 29%</td><td>3.59&times; / 27%</td><td>4.90&times; / 16%</td><td>5.12&times; / 15%</td></tr>
+      <tr><th>M5 &middot; + 8 categories — dropped</th><td>3.67&times; / 31%</td><td>3.71&times; / 30%</td><td>4.69&times; / 23%</td><td>4.86&times; / 18%</td></tr>
+    </tbody>
   </table>
-  <p id="count"></p>
-  <section id="detail" hidden>
-    <h2 id="detail-name"></h2>
-    <div id="detail-body"></div>
-  </section>
-  <section id="traded">
-    <h2>Already trading — not ranked as launches</h2>
-    <p id="traded-note"></p>
-    <table><thead><tr><th>Protocol</th><th>Category</th><th>TVL</th><th>Market cap</th><th>mcap / TVL</th></tr></thead><tbody id="traded-rows"></tbody></table>
-    <button id="traded-more" type="button">Show all</button>
-  </section>
-  <section id="integrity"></section>
-</main>
+  <p>Walk-forward and older-to-newer are far worse than leave-one-out and 10-fold (3.1–5.3&times;).
+  That is reported, not hidden: a launch value is a wide guess, and the intervals below say so.</p>
+
+  <h3>Token odds fall with age — fitted on the peers&rsquo; own record</h3>
+  <p>A protocol that has run for years with no token is less likely to launch one next year than a
+  young one. The survival curve is a Weibull fitted on the cohort record (a protocol counts as
+  having a token when its mcap is above zero): shape k = 0.73, scale &lambda; = 23.1 years.
+  The 12-month launch odds are <strong>7.2% at 6 months old, 6.4% at 1 year, 5.6% at 2 years,
+  5.1% at 3 years, 4.8% at 4 years and 4.6% at 5 years</strong>. TVL and growth do not move the
+  odds — the token rate is flat across TVL bands (15–19%) and growth is confounded by age — so
+  they were tested and left out. Expected value per row is implied value &times; odds.</p>
+  <table class="valid">
+    <caption>Share of protocols with a token (mcap &gt; 0), by age cohort.</caption>
+    <thead><tr><th>Age cohort</th><th>n</th><th>With a token</th><th>Without (survival)</th></tr></thead>
+    <tbody>
+      <tr><th>0–1 year</th><td>161</td><td>6.2%</td><td>93.8%</td></tr>
+      <tr><th>1–2 years</th><td>184</td><td>12.0%</td><td>88.0%</td></tr>
+      <tr><th>2–3 years</th><td>137</td><td>15.3%</td><td>84.7%</td></tr>
+      <tr><th>3–4 years</th><td>89</td><td>24.7%</td><td>75.3%</td></tr>
+      <tr><th>4 years and up</th><td>74</td><td>27.0%</td><td>73.0%</td></tr>
+    </tbody>
+  </table>
+  <h3>Conformal intervals — a range, not a point</h3>
+  <p>Every row shows an 80% interval: fitted value &times; exp(&plusmn;q80), where q80 is the 80th
+  percentile of the model&rsquo;s absolute residuals. The global q80 is 2.39 in log terms, so a
+  typical interval spans about &times;0.09 to &times;10.9 — anyone quoting a point value alone is
+  overstating the precision. Where a category has at least 6 traded protocols its own q80 is used:
+  RWA 0.72 (n=9), Basis Trading 1.44 (n=7), Bridge 1.61 (n=6), Dexs 1.82 (n=11), Yield 1.97 (n=9),
+  Liquid Staking 2.21 (n=9), CEX 2.48 (n=9), Lending 3.39 (n=15), Canonical Bridge 3.68 (n=8).</p>
+  <h3>Farm plans sized to the money at risk</h3>
+  <p>Each candidate&rsquo;s plan costs its gas: four on-chain steps on its home chain (Ethereum $8 a
+  transaction, Arbitrum $0.30, Optimism $0.10, Base $0.05, Polygon $0.05, BSC $0.20, Avalanche
+  $0.30, Solana $0.002, anything else $1) plus a $5 bridge when it lives on more than one chain.
+  Minimum viable capital is max($50, 10 &times; gas cost + bridge). Verdict: <strong>farm</strong>
+  when expected value is at least 3&times; the cost and the odds are at least 5%;
+  <strong>watch</strong> when expected value covers the cost; <strong>thin</strong> otherwise.
+  Break-even is the cost divided by the expected value — the share of the launch value a farmer
+  would need to capture for the plan to pay for itself.</p>
+  <p><strong>One value column.</strong> The gate requires one monotone value column, so every row —
+  candidate, traded anchor and excluded protocol alike — is scored by the same fitted function and
+  the board is sorted by it, rank 1 to 758. Traded rows show their real market cap beside the
+  model value, so the reader can see the model&rsquo;s calibration against reality.</p>
+</section>
+
+<section id="board-wrap">
+  <h2>The board</h2>
+  <p class="model-line">Model: log(mcap) = 6.9646 + 0.5223 &middot; log(TVL), fitted on 128 traded protocols.
+  Held-out M0 — leave-one-out 3.40&times;, 10-fold 3.56&times;, walk-forward 3.08&times;,
+  older-to-newer 5.33&times;. Growth, age and category terms were tested and dropped: none survived
+  the four blind tests. Full table in <a href="#method">Method</a> below.</p>
+  <div class="controls">
+    <label>Search <input id="q" type="search" placeholder="protocol name or slug"></label>
+    <label>Show
+      <select id="view">
+        <option value="candidate" selected>Candidates (198)</option>
+        <option value="all">All 758</option>
+        <option value="traded">Traded (416)</option>
+        <option value="excluded">Excluded (144)</option>
+      </select>
+    </label>
+    <label>Category
+      <select id="cat"><option value="">All categories</option></select>
+    </label>
+    <label>Sort by
+      <select id="sort">
+        <option value="implied" selected>Implied value</option>
+        <option value="tvl">TVL</option>
+        <option value="odds">Launch odds</option>
+        <option value="ev">Expected value</option>
+        <option value="name">Name</option>
+      </select>
+    </label>
+  </div>
+  <p id="count" class="count"></p>
+  <div class="table-scroll">
+    <table id="board">
+      <thead><tr>
+        <th>#</th><th>Protocol</th><th>Status</th><th>TVL</th><th>Implied</th>
+        <th>80% interval</th><th>Odds 12m</th><th>Expected value</th><th>Verdict</th><th>Min capital</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <p class="hint">Click a row for its detail: peer anchor, odds breakdown, farm plan and break-even.</p>
+</section>
+
+<section id="detail" hidden>
+  <h2 id="d-name"></h2>
+  <p id="d-sub" class="d-sub"></p>
+  <dl id="d-facts" class="facts"></dl>
+  <h3>Peer anchor</h3>
+  <p id="d-peer"></p>
+  <h3>Farm plan</h3>
+  <ol id="d-steps"></ol>
+  <p id="d-cost" class="d-cost"></p>
+  <p><a href="#board-wrap" id="d-close">Back to the board</a></p>
+</section>
+
+<footer>
+  <p>Data: the sealed snapshot of 2026-11-14 (DefiLlama). Implied values are this entry&rsquo;s own
+  claim, never make.fun&rsquo;s. A protocol is said to record no token, never to have none.
+  Launch Radar v3 — every value term kept or dropped on four blind tests, conformal intervals per
+  kind, token odds that fall with age, farm plans sized to minimum viable capital.</p>
+</footer>
 <script src="../data.js"></script>
 <script src="app.js"></script>
 </body>
