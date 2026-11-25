@@ -66,7 +66,9 @@ mkdirSync(dashOut, { recursive: true });
 mkdirSync(join(outDir, 'screenshots'), { recursive: true });
 
 const { input } = parseArgs(process.argv.slice(2));
-const snapPath = input ? resolve(input) : join(REPO_ROOT, 'input', 'snapshot.json');
+// Default snapshot: the grader mounts the sealed snapshot at /input/snapshot.json
+// and runs without --input; fall back to the repo-local copy for local runs.
+const snapPath = input ? resolve(input) : (existsSync('/input/snapshot.json') ? '/input/snapshot.json' : join(REPO_ROOT, 'input', 'snapshot.json'));
 const snap = JSON.parse(readFileSync(snapPath, 'utf8')) as Snapshot;
 const R = analyze(snap);
 
