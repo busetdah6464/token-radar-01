@@ -1,13 +1,8 @@
-// Mersenne Twister MT19937, seeded exactly like CPython's random.Random(int).
-//
-// The ten-fold test must shuffle with the same permutation Python produces for
-// random.Random(20261114), so the held-out numbers are reproducible across
-// languages. CPython seeds MT19937 with init_by_array over the seed's 32-bit
-// little-endian words, and shuffle() draws j = _randbelow(i + 1) for i from
-// n-1 down to 1, where _randbelow(n) rejects getrandbits(n.bit_length())
-// values >= n. getrandbits(k) for k <= 32 is genrand_int32() >> (32 - k).
-// Verified against Python: shuffle of range(111) with seed 20261114 matches
-// CPython element for element (111/111).
+// MT19937 (Mersenne Twister) compatible with CPython's random.Random.
+// Replicates CPython's seeding (init_by_array over the seed's 32-bit words),
+// genrand_uint32 output, getrandbits and _randbelow rejection sampling, and
+// the Fisher-Yates shuffle order, so the TypeScript run reproduces the
+// Python reference splits exactly. Node stdlib only.
 
 const N = 624;
 const M = 397;
@@ -15,73 +10,67 @@ const MATRIX_A = 0x9908b0df;
 const UPPER_MASK = 0x80000000;
 const LOWER_MASK = 0x7fffffff;
 
-export class PythonRandom {
-  private mt = new Uint32Array(N);
-  private index = N + 1;
+export class MT19937 {
+  private mt: Uint32Array = new Uint32Array(N);
+  private mti: number = N + 1;
 
-  constructor(seed: number) {
-    // CPython: an int seed becomes its 32-bit little-endian words.
-    const words: number[] = [];
-    let v = Math.abs(Math.trunc(seed));
-    if (v === 0) words.push(0);
-    while (v > 0) {
-      words.push(v >>> 0);
-      v = Math.floor(v / 4294967296);
+  constructor(seedInt: number) {
+    // CPython seeds from an int by splitting it into 32-bit little-endian
+    // words and calling init_by_array. Seed 20261114 fits in one word.
+    const key: number[] = [];
+    let s = seedInt >>> 0;
+    if (s === 0) key.push(0);
+    while (s > 0) {
+      key.push(s >>> 0);
+      s = Math.floor(s / 4294967296);
     }
-    this.initByArray(words);
+    this.initByArray(key);
   }
 
   private initGenrand(s: number): void {
     this.mt[0] = s >>> 0;
-    for (let i = 1; i < N; i++) {
-      const prev = this.mt[i - 1]!;
-      this.mt[i] = (Math.imul(1812433253, prev ^ (prev >>> 30)) + i) >>> 0;
+    for (this.mti = 1; this.mti < N; this.mti++) {
+      const prev = this.mt[this.mti - 1] >>> 0;
+      const x = (prev ^ (prev >>> 30)) >>> 0;
+      this.mt[this.mti] = (Math.imul(1812433253, x) + this.mti) >>> 0;
     }
-    this.index = N;
   }
 
-  private initByArray(key: number[]): void {
+  private initByArray(initKey: number[]): void {
     this.initGenrand(19650218);
     let i = 1;
     let j = 0;
-    const k = Math.max(N, key.length);
-    for (let n = 0; n < k; n++) {
-      const a = this.mt[i - 1]!;
-      this.mt[i] = ((this.mt[i]! ^ Math.imul(a ^ (a >>> 30), 1664525)) + key[j]! + j) >>> 0;
+    const keyLen = initKey.length;
+    for (let k = Math.max(N, keyLen); k > 0; k--) {
+      const a = this.mt[i - 1] >>> 0;
+      const x = (a ^ (a >>> 30)) >>> 0;
+      this.mt[i] =
+        ((this.mt[i] ^ Math.imul(x, 1664525)) + initKey[j] + j) >>> 0;
       i++;
       j++;
       if (i >= N) {
-        this.mt[0] = this.mt[N - 1]!;
+        this.mt[0] = this.mt[N - 1];
         i = 1;
       }
-      if (j >= key.length) j = 0;
+      if (j >= keyLen) j = 0;
     }
-    for (let n = 0; n < N - 1; n++) {
-      const a = this.mt[i - 1]!;
-      this.mt[i] = ((this.mt[i]! ^ Math.imul(a ^ (a >>> 30), 1566083941)) - i) >>> 0;
+    for (let k = N - 1; k > 0; k--) {
+      const a = this.mt[i - 1] >>> 0;
+      const x = (a ^ (a >>> 30)) >>> 0;
+      this.mt[i] = ((this.mt[i] ^ Math.imul(x, 1566083941)) - i) >>> 0;
       i++;
       if (i >= N) {
-        this.mt[0] = this.mt[N - 1]!;
+        this.mt[0] = this.mt[N - 1];
         i = 1;
       }
     }
     this.mt[0] = 0x80000000;
-    this.index = N;
   }
 
-  private twist(): void {
-    for (let i = 0; i < N; i++) {
-      const x = (this.mt[i]! & UPPER_MASK) | (this.mt[(i + 1) % N]! & LOWER_MASK);
-      let xA = x >>> 1;
-      if (x & 1) xA ^= MATRIX_A;
-      this.mt[i] = (this.mt[(i + M) % N]! ^ xA) >>> 0;
-    }
-    this.index = 0;
-  }
-
-  private int32(): number {
-    if (this.index >= N) this.twist();
-    let y = this.mt[this.index++]!;
+  // One unsigned 32-bit output (CPython genrand_uint32).
+  uint32(): number {
+    if (this.mti >= N) this.twist();
+    let y = this.mt[this.mti++] >>> 0;
     y ^= y >>> 11;
     y ^= (y << 7) & 0x9d2c5680;
     y ^= (y << 15) & 0xefc60000;
@@ -89,30 +78,70 @@ export class PythonRandom {
     return y >>> 0;
   }
 
-  private getrandbits(k: number): number {
-    return this.int32() >>> (32 - k);
+  private twist(): void {
+    const mag01 = [0, MATRIX_A];
+    let kk = 0;
+    for (; kk < N - M; kk++) {
+      const y =
+        ((this.mt[kk] & UPPER_MASK) | (this.mt[kk + 1] & LOWER_MASK)) >>> 0;
+      this.mt[kk] = (this.mt[kk + M] ^ (y >>> 1) ^ mag01[y & 1]) >>> 0;
+    }
+    for (; kk < N - 1; kk++) {
+      const y =
+        ((this.mt[kk] & UPPER_MASK) | (this.mt[kk + 1] & LOWER_MASK)) >>> 0;
+      this.mt[kk] =
+        (this.mt[kk + (M - N)] ^ (y >>> 1) ^ mag01[y & 1]) >>> 0;
+    }
+    const y =
+      ((this.mt[N - 1] & UPPER_MASK) | (this.mt[0] & LOWER_MASK)) >>> 0;
+    this.mt[N - 1] = (this.mt[M - 1] ^ (y >>> 1) ^ mag01[y & 1]) >>> 0;
+    this.mti = 0;
   }
 
-  private randbelow(n: number): number {
-    let bits = 0;
-    let t = n;
-    while (t > 0) {
-      bits++;
-      t >>>= 1;
+  // CPython getrandbits(k): k bits from the top of successive uint32 words.
+  getrandbits(k: number): number {
+    if (k <= 0) return 0;
+    if (k <= 32) {
+      return this.uint32() >>> (32 - k);
     }
-    let r = this.getrandbits(bits);
-    while (r >= n) r = this.getrandbits(bits);
+    // k > 32: accumulate whole words, low word first (CPython order).
+    let r = 0;
+    let remaining = k;
+    while (remaining > 0) {
+      const take = Math.min(remaining, 32);
+      const word = this.uint32() >>> (32 - take);
+      r = r * 4294967296 + word;
+      remaining -= take;
+    }
     return r;
   }
 
-  /** Shuffle in place, exactly like CPython's random.shuffle. */
-  shuffle<T>(arr: T[]): T[] {
-    for (let i = arr.length - 1; i > 0; i--) {
-      const j = this.randbelow(i + 1);
-      const tmp = arr[i]!;
-      arr[i] = arr[j]!;
-      arr[j] = tmp;
+  // CPython _randbelow(n): k = n.bit_length() (note: bit_length(n), NOT
+  // bit_length(n-1) — they differ when n is a power of two, and the
+  // rejection rate there shifts the stream).
+  randbelow(n: number): number {
+    if (n <= 0) throw new Error('_randbelow needs n > 0');
+    const k = 32 - Math.clz32(n); // bit_length of n
+    for (;;) {
+      const r = this.getrandbits(k);
+      if (r < n) return r;
     }
-    return arr;
+  }
+
+  // CPython Random.randrange(n) for a plain range(n).
+  randrange(n: number): number {
+    return this.randbelow(n);
+  }
+
+  // CPython Random.shuffle: for i from len-1 down to 1, j = _randbelow(i+1).
+  shuffle<T>(arr: T[]): T[] {
+    const a = arr.slice();
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = this.randbelow(i + 1);
+      const t = a[i];
+      a[i] = a[j];
+      a[j] = t;
+    }
+    return a;
   }
 }

@@ -1,37 +1,28 @@
-// Launch Radar v4 — model, validation, odds, board and farm plans.
-//
-// Method (see README for the full statement):
-//  * Fit set: traded protocols with TVL >= $5M and mcap/TVL in [0.01, 10] (n=111).
-//    The 17 protocols the filter drops are extreme outliers (bridges and staked
-//    products with tiny market caps against huge TVL, and the reverse).
-//  * Value model: log(mcap) = a + b*log(TVL) + c*growth, growth = change_7d in
-//    PER CENT clipped to [-50, +50] before fitting and before predicting. The
-//    clip matters: one protocol reports +4,448% and without it would imply a
-//    $372 trillion market cap. The model is chosen at runtime by the lowest sum
-//    of four held-out median ratio errors (leave-one-out, 10-fold, walk-forward,
-//    older-to-newer) among M0/M1/M2/M5.
-//  * Token odds: ridge-logistic on log TVL, log age, clipped growth and category
-//    dummies, chosen by 10-fold cross-validated Brier score against an age-only
-//    Weibull and a category-share baseline.
-//  * Conformal intervals: 80th percentile of |residual| on the filtered fit,
-//    per category (global fallback), linear-interpolation quantile.
-//  * Board: candidate-only (pre-token, not excluded), ranked by implied value
-//    descending. Traded protocols anchor a separate section; excluded pre-token
-//    protocols are listed separately with their reason. All 758 protocols are
-//    accounted for.
-//  * Farm: six concrete steps per candidate, costed by chain gas, minimum viable
-//    capital = max($50, 10 x gas cost + bridge).
+// Launch Radar v5 model: fitted value model (log-log OLS on the filtered
+// traded set), multivariate ridge-logistic token odds, cohort odds,
+// conformal intervals, held-out tests (4 directions + placebo + bootstrap
+// + blind), full 342-row board with farm verdicts. Node stdlib only.
+// Every number is computed at runtime from the snapshot; nothing is
+// hardcoded from earlier versions. Mirrors the Python reference exactly
+// (same seeds, splits, grids, and definitions).
 
-import { PythonRandom } from './mt19937.ts';
+import { MT19937 } from './mt19937.ts';
 
-export interface Protocol {
+export const SEED = 20261114;
+export const BLIND_SEED = 20261115;
+export const FLOOR_USD = 50_000_000;
+export const AS_OF = '2026-11-14';
+export const RIDGE_LAM = 1.0;
+export const IRLS_ITERS = 25;
+
+export interface Proto {
   slug: string;
   name: string;
   category: string | null;
   chains: string[];
   tvl_usd: number;
   change_7d: number | null;
-  mcap_usd: number | null;
+  mcap_usd: number | string | null;
   listed_at: string | null;
   gecko_id: string | null;
   symbol: string | null;
@@ -41,996 +32,927 @@ export interface Snapshot {
   as_of: string;
   source: string;
   floor_usd: number;
-  protocols: Protocol[];
+  protocols: Proto[];
   watchlist: string[];
 }
 
-/** The snapshot's market-cap field is a number here, but coerce defensively:
- *  a string such as '0' or '-1' parses to a number; anything unparseable is null. */
-export function coerceMcap(v: unknown): number | null {
-  if (typeof v === 'number' && Number.isFinite(v)) return v;
-  if (typeof v === 'string') {
-    const n = Number(v.trim());
-    return Number.isFinite(n) ? n : null;
-  }
+export function mcapNum(p: Proto): number | null {
+  if (p.mcap_usd === null || p.mcap_usd === undefined) return null;
+  const v = typeof p.mcap_usd === 'string' ? Number(p.mcap_usd) : p.mcap_usd;
+  return Number.isFinite(v) ? v : null;
+}
+
+export function hasToken(p: Proto): boolean {
+  const m = mcapNum(p);
+  return p.gecko_id !== null || p.symbol !== null || (m !== null && m > 0);
+}
+
+export function ageDays(p: Proto): number {
+  if (!p.listed_at) return 0;
+  const a = Date.parse(AS_OF + 'T00:00:00Z');
+  const b = Date.parse(p.listed_at + 'T00:00:00Z');
+  return Math.max(0, Math.round((a - b) / 86400000));
+}
+
+export function growth(p: Proto): number {
+  const g = p.change_7d === null || p.change_7d === undefined ? 0 : p.change_7d;
+  return Math.max(-50, Math.min(50, g));
+}
+
+const VERSION_RE = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
+const EXCHANGE_PREFIX =
+  /^(Binance|Coinbase|Bybit|Kraken|Bitget|OKX|Bitfinex|Gemini)\b/;
+const WRAPPED_WORD = /\b(wrapped|staked|staking)\b/i;
+const FLAGGED_CATS = new Set([
+  'Bridge',
+  'Canonical Bridge',
+  'Liquid Staking',
+  'Liquid Restaking',
+  'Restaked BTC',
+  'CEX',
+]);
+
+// Why a pre-token protocol is NOT a launch candidate (null = candidate).
+export function flagReason(p: Proto): string | null {
+  if (FLAGGED_CATS.has(p.category ?? '')) return 'category ' + p.category;
+  if (VERSION_RE.test(p.name)) return 'versioned name';
+  if (WRAPPED_WORD.test(p.name)) return 'wrapped/staked product';
+  if (EXCHANGE_PREFIX.test(p.name)) return 'exchange product';
   return null;
 }
 
-export function parseSnapshot(text: string): Snapshot {
-  const raw = JSON.parse(text) as Record<string, unknown>;
-  const protocols = (raw.protocols as Record<string, unknown>[]).map((p) => ({
-    slug: String(p.slug ?? ''),
-    name: String(p.name ?? ''),
-    category: p.category === null || p.category === undefined ? null : String(p.category),
-    chains: Array.isArray(p.chains) ? (p.chains as unknown[]).map((c) => String(c)) : [],
-    tvl_usd: Number(p.tvl_usd ?? 0),
-    change_7d: p.change_7d === null || p.change_7d === undefined ? null : Number(p.change_7d),
-    mcap_usd: coerceMcap(p.mcap_usd),
-    listed_at: p.listed_at === null || p.listed_at === undefined ? null : String(p.listed_at),
-    gecko_id: p.gecko_id === null || p.gecko_id === undefined ? null : String(p.gecko_id),
-    symbol: p.symbol === null || p.symbol === undefined ? null : String(p.symbol),
-  }));
-  return {
-    as_of: String(raw.as_of ?? ''),
-    source: String(raw.source ?? ''),
-    floor_usd: Number(raw.floor_usd ?? 0),
-    protocols,
-    watchlist: Array.isArray(raw.watchlist) ? (raw.watchlist as unknown[]).map((w) => String(w)) : [],
-  };
+export function fitset(ps: Proto[]): Proto[] {
+  return ps.filter((p) => {
+    const m = mcapNum(p);
+    if (m === null || m <= 0) return false;
+    if (p.tvl_usd < 5_000_000) return false;
+    const r = m / p.tvl_usd;
+    return r >= 0.01 && r <= 10;
+  });
 }
 
-/** Days from a YYYY-MM-DD date to the snapshot date, never negative. */
-export function daysBetween(from: string, to: string): number {
-  const a = Date.parse(`${from}T00:00:00Z`);
-  const b = Date.parse(`${to}T00:00:00Z`);
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return 0;
-  return Math.max(0, Math.round((b - a) / 86400000));
+// ---------- small numeric helpers ----------
+
+export function median(a: number[]): number {
+  const s = a.slice().sort((x, y) => x - y);
+  const n = s.length;
+  if (n === 0) return NaN;
+  if (n % 2 === 1) return s[(n - 1) / 2];
+  return (s[n / 2 - 1] + s[n / 2]) / 2;
 }
 
-export function ageDays(p: Protocol, asOf: string): number | null {
-  return p.listed_at === null ? null : daysBetween(p.listed_at, asOf);
+// Linear-interpolation percentile (numpy percentile, method='linear').
+export function percentile(sortedAsc: number[], q: number): number {
+  const n = sortedAsc.length;
+  if (n === 0) return NaN;
+  if (n === 1) return sortedAsc[0];
+  const rank = (q / 100) * (n - 1);
+  const lo = Math.floor(rank);
+  const hi = Math.ceil(rank);
+  if (lo === hi) return sortedAsc[lo];
+  const frac = rank - lo;
+  return sortedAsc[lo] * (1 - frac) + sortedAsc[hi] * frac;
 }
 
-/** change_7d is a PER CENT figure (median about -9%). Null means unreported.
- *  Clip to +/-50 before any use: the raw +4,448% outlier would otherwise
- *  imply a $372 trillion market cap for one protocol. */
-export function growthClipped(p: Protocol): number {
-  if (p.change_7d === null || !Number.isFinite(p.change_7d)) return 0;
-  return Math.max(-50, Math.min(50, p.change_7d));
+export function mean(a: number[]): number {
+  return a.reduce((s, v) => s + v, 0) / a.length;
 }
 
-export function hasToken(p: Protocol): boolean {
-  return (p.mcap_usd !== null && p.mcap_usd > 0) || p.gecko_id !== null || p.symbol !== null;
+export function popStd(a: number[]): number {
+  const m = mean(a);
+  return Math.sqrt(mean(a.map((v) => (v - m) * (v - m))));
 }
 
-export function isPreToken(p: Protocol): boolean {
-  return !hasToken(p);
+// Solve A x = b by Gaussian elimination with partial pivoting.
+export function solveLinear(Ain: number[][], bin: number[]): number[] {
+  const n = bin.length;
+  const A = Ain.map((row) => row.slice());
+  const b = bin.slice();
+  for (let col = 0; col < n; col++) {
+    let piv = col;
+    for (let r = col + 1; r < n; r++) {
+      if (Math.abs(A[r][col]) > Math.abs(A[piv][col])) piv = r;
+    }
+    if (piv !== col) {
+      const t = A[col];
+      A[col] = A[piv];
+      A[piv] = t;
+      const tb = b[col];
+      b[col] = b[piv];
+      b[piv] = tb;
+    }
+    const d = A[col][col];
+    for (let r = col + 1; r < n; r++) {
+      const f = A[r][col] / d;
+      if (f === 0) continue;
+      for (let c = col; c < n; c++) A[r][c] -= f * A[col][c];
+      b[r] -= f * b[col];
+    }
+  }
+  const x = new Array(n).fill(0);
+  for (let r = n - 1; r >= 0; r--) {
+    let s = b[r];
+    for (let c = r + 1; c < n; c++) s -= A[r][c] * x[c];
+    x[r] = s / A[r][r];
+  }
+  return x;
 }
 
-export function median(xs: number[]): number {
-  if (xs.length === 0) return 0;
-  const s = [...xs].sort((a, b) => a - b);
-  const mid = (s.length - 1) / 2;
-  const lo = Math.floor(mid);
-  const hi = Math.ceil(mid);
-  return (s[lo]! + s[hi]!) / 2;
-}
-
-/** Quantile with linear interpolation (the numpy percentile default), so the
- *  conformal widths match the reference computation exactly. */
-export function quantileLinear(xs: number[], q: number): number {
-  if (xs.length === 0) return 0;
-  const s = [...xs].sort((a, b) => a - b);
-  const pos = q * (s.length - 1);
-  const lo = Math.floor(pos);
-  const hi = Math.ceil(pos);
-  if (lo === hi) return s[lo]!;
-  return s[lo]! + (s[hi]! - s[lo]!) * (pos - lo);
-}
-
-export function mean(xs: number[]): number {
-  return xs.length === 0 ? 0 : xs.reduce((a, b) => a + b, 0) / xs.length;
-}
-
-export function std(xs: number[]): number {
-  if (xs.length < 2) return 1;
-  const m = mean(xs);
-  const v = xs.reduce((a, b) => a + (b - m) * (b - m), 0) / xs.length;
-  const s = Math.sqrt(v);
-  return s === 0 ? 1 : s;
-}
-
-// ---- least squares by modified Gram-Schmidt QR (stable on raw scales) ----
-
-/** Solve min ||X b - y|| for X (n x p), y (n). Returns b (p). Columns that are
- *  (numerically) dependent get a zero coefficient instead of blowing up. */
-export function lstsq(X: number[][], y: number[]): number[] {
+// Ordinary least squares via normal equations. A column that is all zero
+// (a category dummy absent from a training split) is dropped from the
+// solve and its coefficient set to 0 — the same minimum-norm answer
+// numpy lstsq gives for a zero column. Returns coefficients, R^2, median
+// exp(|residual|), residuals and predictions.
+export function ols(X: number[][], y: number[]) {
   const n = X.length;
-  const p = X[0]!.length;
-  // Q columns as arrays of length n, R as p x p.
-  const Q: number[][] = [];
-  const R: number[][] = Array.from({ length: p }, () => new Array<number>(p).fill(0));
-  for (let j = 0; j < p; j++) {
-    let v = X.map((row) => row[j]!);
-    for (let i = 0; i < j; i++) {
-      let dot = 0;
-      for (let r = 0; r < n; r++) dot += Q[i]![r]! * v[r]!;
-      R[i]![j] = dot;
-      for (let r = 0; r < n; r++) v[r]! -= dot * Q[i]![r]!;
+  const k = X[0].length;
+  const active: number[] = [];
+  for (let j = 0; j < k; j++) {
+    let nz = false;
+    for (let i = 0; i < n; i++) {
+      if (X[i][j] !== 0) {
+        nz = true;
+        break;
+      }
     }
-    let norm = 0;
-    for (let r = 0; r < n; r++) norm += v[r]! * v[r]!;
-    norm = Math.sqrt(norm);
-    R[j]![j] = norm;
-    if (norm < 1e-12) {
-      Q.push(new Array<number>(n).fill(0));
-    } else {
-      Q.push(v.map((x) => x / norm));
+    if (nz) active.push(j);
+  }
+  const ka = active.length;
+  const XtX: number[][] = Array.from({ length: ka }, () => new Array(ka).fill(0));
+  const Xty: number[] = new Array(ka).fill(0);
+  for (let i = 0; i < n; i++) {
+    for (let a = 0; a < ka; a++) {
+      Xty[a] += X[i][active[a]] * y[i];
+      for (let b = 0; b < ka; b++) XtX[a][b] += X[i][active[a]] * X[i][active[b]];
     }
   }
-  // Q'y
-  const qty: number[] = [];
-  for (let i = 0; i < p; i++) {
-    let dot = 0;
-    for (let r = 0; r < n; r++) dot += Q[i]![r]! * y[r]!;
-    qty.push(dot);
-  }
-  // Back-substitution R b = Q'y
-  const b = new Array<number>(p).fill(0);
-  for (let i = p - 1; i >= 0; i--) {
-    if (Math.abs(R[i]![i]!) < 1e-12) {
-      b[i] = 0;
-      continue;
-    }
-    let s = qty[i]!;
-    for (let j = i + 1; j < p; j++) s -= R[i]![j]! * b[j]!;
-    b[i] = s / R[i]![i]!;
-  }
-  return b;
+  const betaA = solveLinear(XtX, Xty);
+  const beta = new Array(k).fill(0);
+  active.forEach((j, a) => (beta[j] = betaA[a]));
+  const pred = X.map((row) => row.reduce((s, v, j) => s + v * beta[j], 0));
+  const resid = y.map((v, i) => v - pred[i]);
+  const ym = mean(y);
+  const ssTot = y.reduce((s, v) => s + (v - ym) * (v - ym), 0);
+  const ssRes = resid.reduce((s, v) => s + v * v, 0);
+  const r2 = 1 - ssRes / ssTot;
+  const med = median(resid.map((r) => Math.exp(Math.abs(r))));
+  return { beta, r2, med, resid, pred };
 }
 
-export function predictRow(X: number[][], b: number[]): number[] {
-  return X.map((row) => row.reduce((s, x, j) => s + x * b[j]!, 0));
+export function medErr(X: number[][], y: number[]): number {
+  return ols(X, y).med;
 }
 
-/** Median ratio error: median(exp(|log actual - log predicted|)). */
-export function medianRatioError(y: number[], pred: number[]): number {
-  const errs = y.map((v, i) => Math.exp(Math.abs(v - pred[i]!)));
-  return median(errs);
-}
-
-// ---- value models ----
+// ---------- value model (M0/M1/M2/M5) ----------
 
 export type ModelName = 'M0' | 'M1' | 'M2' | 'M5';
 
-export interface FitRow {
-  p: Protocol;
-  y: number; // log(mcap)
-  logTvl: number;
-  growth: number; // clipped per cent
-  age: number; // days, null-age imputed to the fit set's median age
+export function design(
+  ps: Proto[],
+  model: ModelName,
+  catDummies: string[],
+): { X: number[][]; y: number[]; names: string[] } {
+  const X: number[][] = [];
+  const y: number[] = [];
+  const names = ['const', 'lnTVL'];
+  if (model !== 'M0') names.push('growth');
+  if (model === 'M2' || model === 'M5') names.push('age_yrs');
+  if (model === 'M5') for (const c of catDummies) names.push('cat_' + c);
+  for (const p of ps) {
+    const m = mcapNum(p);
+    if (m === null || m <= 0) continue;
+    const row = [1, Math.log(p.tvl_usd)];
+    if (model !== 'M0') row.push(growth(p));
+    if (model === 'M2' || model === 'M5') {
+      row.push(ageDays(p) / 365.25);
+    }
+    if (model === 'M5') {
+      for (const c of catDummies) {
+        row.push(p.category === c ? 1 : 0);
+      }
+    }
+    X.push(row);
+    y.push(Math.log(m));
+  }
+  return { X, y, names };
 }
 
-export function buildFitRows(snap: Snapshot): FitRow[] {
-  const traded = snap.protocols.filter(
-    (p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd >= 5_000_000 &&
-      p.mcap_usd / p.tvl_usd >= 0.01 && p.mcap_usd / p.tvl_usd <= 10,
-  );
-  const ages = traded.map((p) => ageDays(p, snap.as_of)).filter((a): a is number => a !== null);
-  const medAge = median(ages);
-  return traded.map((p) => ({
-    p,
-    y: Math.log(p.mcap_usd!),
-    logTvl: Math.log(p.tvl_usd),
-    growth: growthClipped(p),
-    age: ageDays(p, snap.as_of) ?? medAge,
-  }));
-}
-
-export function topCategories(rows: FitRow[], k: number): string[] {
+export function topCategories(
+  ps: Proto[],
+  limit: number,
+  minCount: number,
+): string[] {
   const counts = new Map<string, number>();
-  for (const r of rows) {
-    const c = r.p.category ?? 'None';
-    counts.set(c, (counts.get(c) ?? 0) + 1);
+  for (const p of ps) {
+    if (!p.category) continue;
+    counts.set(p.category, (counts.get(p.category) ?? 0) + 1);
   }
-  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, k).map(([c]) => c);
+  const entries = [...counts.entries()]
+    .filter(([, n]) => n >= minCount)
+    .sort((a, b) => b[1] - a[1]); // stable: ties keep first-encounter order
+  return entries.slice(0, limit).map(([c]) => c);
 }
 
-export function designMatrix(rows: FitRow[], model: ModelName, cats: string[]): number[][] {
-  return rows.map((r) => {
-    const base = [1, r.logTvl];
-    if (model === 'M0') return base;
-    const withGrowth = [...base, r.growth];
-    if (model === 'M1') return withGrowth;
-    const withAge = [...withGrowth, r.age];
-    if (model === 'M2') return withAge;
-    const dummies = cats.map((c) => ((r.p.category ?? 'None') === c ? 1 : 0));
-    return [...withAge, ...dummies];
-  });
-}
-
-export const MODELS: ModelName[] = ['M0', 'M1', 'M2', 'M5'];
-
-export interface ModelFit {
-  name: ModelName;
-  beta: number[];
-  r2: number;
-  medianErr: number;
-}
-
-export function fitModel(rows: FitRow[], model: ModelName, cats: string[]): ModelFit {
-  const X = designMatrix(rows, model, cats);
-  const y = rows.map((r) => r.y);
-  const beta = lstsq(X, y);
-  const pred = predictRow(X, beta);
-  const yMean = mean(y);
-  let ssTot = 0;
-  let ssRes = 0;
-  for (let i = 0; i < y.length; i++) {
-    ssTot += (y[i]! - yMean) ** 2;
-    ssRes += (y[i]! - pred[i]!) ** 2;
-  }
-  return { name: model, beta, r2: 1 - ssRes / ssTot, medianErr: medianRatioError(y, pred) };
-}
-
-// ---- four-way held-out validation (all median ratio errors) ----
-
-export const FOLD_SEED = 20261114;
-
-export interface HeldOut {
-  loo: number;
-  tenFold: number;
-  walkForward: number;
-  olderToNewer: number;
-  sum: number;
-}
-
-function errorOn(rows: FitRow[], model: ModelName, cats: string[], trainIdx: number[], testIdx: number[]): number {
-  const X = designMatrix(rows, model, cats);
-  const y = rows.map((r) => r.y);
-  const beta = lstsq(trainIdx.map((i) => X[i]!), trainIdx.map((i) => y[i]!));
-  const errs = testIdx.map((i) => Math.exp(Math.abs(y[i]! - X[i]!.reduce((s, x, j) => s + x * beta[j]!, 0))));
-  return median(errs);
-}
-
-export function leaveOneOut(rows: FitRow[], model: ModelName, cats: string[]): number {
-  const n = rows.length;
-  const errs: number[] = [];
-  for (let i = 0; i < n; i++) {
-    const train = Array.from({ length: n }, (_, k) => k).filter((k) => k !== i);
-    errs.push(errorOn(rows, model, cats, train, [i]));
-  }
-  return median(errs);
-}
-
-export function tenFold(rows: FitRow[], model: ModelName, cats: string[]): number {
-  // Python random.Random(20261114).shuffle, folds = perm[k::10].
-  const rng = new PythonRandom(FOLD_SEED);
-  const perm = rng.shuffle(Array.from({ length: rows.length }, (_, i) => i));
-  const X = designMatrix(rows, model, cats);
-  const y = rows.map((r) => r.y);
-  const errs: number[] = [];
+// Held-out ablation. WF = dated-only split (train listed_at < 2025-01-01,
+// test >= 2025-01-01); O2N = oldest 70% train, newest 30% test.
+export function ablation(fit: Proto[]) {
+  const top = topCategories(fit, 8, 0);
+  const catDummies = top.slice(1);
+  const n = fit.length;
+  const perm = new MT19937(SEED).shuffle(
+    Array.from({ length: n }, (_, i) => i),
+  );
+  const folds: number[][] = [];
   for (let k = 0; k < 10; k++) {
-    const test = perm.filter((_, j) => j % 10 === k);
-    const testSet = new Set(test);
-    const train = perm.filter((i) => !testSet.has(i));
-    const beta = lstsq(train.map((t) => X[t]!), train.map((t) => y[t]!));
-    for (const i of test) {
-      errs.push(Math.exp(Math.abs(y[i]! - X[i]!.reduce((s, x, j) => s + x * beta[j]!, 0))));
+    const f: number[] = [];
+    for (let i = k; i < n; i += 10) f.push(perm[i]);
+    folds.push(f);
+  }
+  const dated = fit.filter((p) => p.listed_at !== null);
+  const wfTrain = dated.filter((p) => (p.listed_at as string) < '2025-01-01');
+  const wfTest = dated.filter((p) => (p.listed_at as string) >= '2025-01-01');
+  const byAge = fit
+    .map((p, i) => ({ i, a: ageDays(p) }))
+    .sort((x, y) => y.a - x.a); // stable: ties keep snapshot order
+  const o2nCut = Math.floor(0.7 * n);
+  const o2nTrain = byAge.slice(0, o2nCut).map((o) => fit[o.i]);
+  const o2nTest = byAge.slice(o2nCut).map((o) => fit[o.i]);
+
+  const out: Record<string, Record<string, number>> = {};
+  const models: ModelName[] = ['M0', 'M1', 'M2', 'M5'];
+  let m1Beta: number[] = [];
+  for (const m of models) {
+    const { X, y, names } = design(fit, m, catDummies);
+    // LOO
+    const looErrs: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const Xk = X.filter((_, j) => j !== i);
+      const yk = y.filter((_, j) => j !== i);
+      const b = ols(Xk, yk).beta;
+      const pred = X[i].reduce((s, v, j) => s + v * b[j], 0);
+      looErrs.push(Math.abs(y[i] - pred));
     }
-  }
-  return median(errs);
-}
-
-/** Walk-forward: train on protocols listed before 2025-01-01, test on those
- *  listed in 2025 or later (n_test = 26). Protocols with no listing date are
- *  in neither side. */
-export function walkForward(rows: FitRow[], model: ModelName, cats: string[]): number {
-  const train: number[] = [];
-  const test: number[] = [];
-  rows.forEach((r, i) => {
-    if (r.p.listed_at === null) return;
-    if (r.p.listed_at < '2025-01-01') train.push(i);
-    else test.push(i);
-  });
-  return errorOn(rows, model, cats, train, test);
-}
-
-/** Older-to-newer: sort by age with unlisted protocols counted as age 0
- *  (newest), train on the oldest 70%, test on the newest 30%. */
-export function olderToNewer(rows: FitRow[], model: ModelName, cats: string[], asOf: string): number {
-  const order = rows
-    .map((r, i) => ({ i, age: ageDays(r.p, asOf) ?? 0 }))
-    .sort((a, b) => b.age - a.age)
-    .map((o) => o.i);
-  const nTrain = Math.floor(rows.length * 0.7);
-  return errorOn(rows, model, cats, order.slice(0, nTrain), order.slice(nTrain));
-}
-
-export function heldOutAll(rows: FitRow[], model: ModelName, cats: string[], asOf: string): HeldOut {
-  const loo = leaveOneOut(rows, model, cats);
-  const tenFoldV = tenFold(rows, model, cats);
-  const wf = walkForward(rows, model, cats);
-  const o2n = olderToNewer(rows, model, cats, asOf);
-  return { loo, tenFold: tenFoldV, walkForward: wf, olderToNewer: o2n, sum: loo + tenFoldV + wf + o2n };
-}
-
-/** The selection rule: lowest sum of the four median ratio errors. */
-export function selectModel(rows: FitRow[], cats: string[], asOf: string): { fits: ModelFit[]; held: Record<ModelName, HeldOut>; winner: ModelName } {
-  const fits = MODELS.map((m) => fitModel(rows, m, cats));
-  const held = {} as Record<ModelName, HeldOut>;
-  for (const m of MODELS) held[m] = heldOutAll(rows, m, cats, asOf);
-  let winner: ModelName = 'M0';
-  let best = Infinity;
-  for (const m of MODELS) {
-    if (held[m].sum < best) {
-      best = held[m].sum;
-      winner = m;
+    const loo = median(looErrs.map((e) => Math.exp(e)));
+    // 10-fold
+    const f10Errs: number[] = [];
+    for (let k = 0; k < 10; k++) {
+      const te = new Set(folds[k]);
+      const Xtr = X.filter((_, j) => !te.has(j));
+      const ytr = y.filter((_, j) => !te.has(j));
+      const b = ols(Xtr, ytr).beta;
+      for (const j of folds[k]) {
+        const pred = X[j].reduce((s, v, jj) => s + v * b[jj], 0);
+        f10Errs.push(Math.abs(y[j] - pred));
+      }
     }
+    const f10 = median(f10Errs.map((e) => Math.exp(e)));
+    // walk-forward (dated only)
+    const wf = (() => {
+      const d = design(wfTrain, m, catDummies);
+      const b = ols(d.X, d.y).beta;
+      const dt = design(wfTest, m, catDummies);
+      const errs = dt.y.map((v, i) =>
+        Math.abs(v - dt.X[i].reduce((s, x, j) => s + x * b[j], 0)),
+      );
+      return median(errs.map((e) => Math.exp(e)));
+    })();
+    // older-to-newer
+    const o2n = (() => {
+      const d = design(o2nTrain, m, catDummies);
+      const b = ols(d.X, d.y).beta;
+      const dt = design(o2nTest, m, catDummies);
+      const errs = dt.y.map((v, i) =>
+        Math.abs(v - dt.X[i].reduce((s, x, j) => s + x * b[j], 0)),
+      );
+      return median(errs.map((e) => Math.exp(e)));
+    })();
+    const full = ols(X, y);
+    out[m] = {
+      loo,
+      f10,
+      wf,
+      o2n,
+      sum: loo + f10 + wf + o2n,
+      r2: full.r2,
+      med: full.med,
+      nTestWf: wfTest.length,
+      nTestO2n: o2nTest.length,
+    };
+    if (m === 'M1') m1Beta = full.beta;
   }
-  return { fits, held, winner };
+  return { table: out, catDummies, refCat: top[0], nFit: n, m1Beta };
 }
 
-// ---- conformal intervals (80th percentile of |residual|, per category) ----
-
-export interface Conformal {
-  global: number;
-  byCategory: Map<string, number>;
-}
-
-export function conformal(rows: FitRow[], fit: ModelFit, cats: string[]): Conformal {
-  const X = designMatrix(rows, fit.name, cats);
-  const pred = predictRow(X, fit.beta);
-  const absResid = rows.map((r, i) => Math.abs(r.y - pred[i]!));
-  const byCategory = new Map<string, number>();
-  const catsSeen = new Map<string, number[]>();
-  rows.forEach((r, i) => {
-    const c = r.p.category ?? 'None';
-    const arr = catsSeen.get(c) ?? [];
-    arr.push(absResid[i]!);
-    catsSeen.set(c, arr);
-  });
-  for (const [c, arr] of catsSeen) {
-    // A category with fewer than 6 fit points borrows the global width.
-    byCategory.set(c, arr.length >= 6 ? quantileLinear(arr, 0.8) : quantileLinear(absResid, 0.8));
-  }
-  return { global: quantileLinear(absResid, 0.8), byCategory };
-}
-
-export function intervalFor(p: Protocol, conf: Conformal): number {
-  return conf.byCategory.get(p.category ?? 'None') ?? conf.global;
-}
-
-// ---- token odds: ridge-logistic vs Weibull age-only vs category-share ----
-
-export interface OddsFeatures {
-  logTvl: number;
-  logAge: number; // log(age_days + 1), null-age imputed to the median age
-  growth: number; // clipped per cent
-  category: string;
-}
-
-export function oddsFeatures(snap: Snapshot): OddsFeatures[] {
-  const ages = snap.protocols.map((p) => ageDays(p, snap.as_of)).filter((a): a is number => a !== null);
-  const medAge = median(ages);
-  return snap.protocols.map((p) => ({
-    logTvl: Math.log(p.tvl_usd),
-    logAge: Math.log((ageDays(p, snap.as_of) ?? medAge) + 1),
-    growth: growthClipped(p),
-    category: p.category ?? 'None',
-  }));
-}
+// ---------- token odds ----------
 
 export function sigmoid(z: number): number {
   const c = Math.max(-30, Math.min(30, z));
   return 1 / (1 + Math.exp(-c));
 }
 
-export interface LogisticModel {
-  intercept: number;
-  bLogTvl: number;
-  bLogAge: number;
-  bGrowth: number;
-  catBeta: Map<string, number>;
-  means: { logTvl: number; logAge: number; growth: number };
-  sds: { logTvl: number; logAge: number; growth: number };
-  categories: string[];
+// Ridge logistic by IRLS: fixed 25 iterations from beta=0, intercept
+// (column 0) unpenalised, lambda=1.0.
+export function ridgeLogitFit(
+  X: number[][],
+  y: number[],
+  lam: number = RIDGE_LAM,
+  iters: number = IRLS_ITERS,
+): number[] {
+  const n = X.length;
+  const k = X[0].length;
+  let beta = new Array(k).fill(0);
+  const P: number[][] = Array.from({ length: k }, (_, i) =>
+    Array.from({ length: k }, (_, j) => (i === j && i !== 0 ? lam : 0)),
+  );
+  for (let it = 0; it < iters; it++) {
+    const p: number[] = [];
+    const W: number[] = [];
+    const z: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const lin = X[i].reduce((s, v, j) => s + v * beta[j], 0);
+      const pi = sigmoid(lin);
+      const w = pi * (1 - pi) + 1e-9;
+      p.push(pi);
+      W.push(w);
+      z.push(lin + (y[i] - pi) / w);
+    }
+    const A: number[][] = Array.from({ length: k }, () => new Array(k).fill(0));
+    const b: number[] = new Array(k).fill(0);
+    for (let i = 0; i < n; i++) {
+      for (let a = 0; a < k; a++) {
+        b[a] += X[i][a] * W[i] * z[i];
+        for (let c = 0; c < k; c++) A[a][c] += X[i][a] * W[i] * X[i][c];
+      }
+    }
+    for (let a = 0; a < k; a++) {
+      for (let c = 0; c < k; c++) A[a][c] += P[a][c];
+    }
+    beta = solveLinear(A, b);
+  }
+  return beta;
 }
 
-const LOGISTIC_LAMBDA = 1.0;
-const LOGISTIC_ITERS = 2000;
-const LOGISTIC_LR = 0.1;
+export function brier(p: number[], y: number[]): number {
+  return mean(p.map((v, i) => (v - y[i]) * (v - y[i])));
+}
 
-/** Ridge-logistic by gradient descent on standardized continuous features and
- *  one-hot categories. The growth feature uses the clipped PER CENT value
- *  (an earlier version clipped as if it were a fraction, which killed the
- *  feature for ~90% of protocols). */
-export function fitLogistic(feats: OddsFeatures[], y: number[], trainIdx: number[]): LogisticModel {
-  const categories = [...new Set(feats.map((f) => f.category))].sort();
-  const tr = trainIdx;
-  const logTvl = tr.map((i) => feats[i]!.logTvl);
-  const logAge = tr.map((i) => feats[i]!.logAge);
-  const growth = tr.map((i) => feats[i]!.growth);
-  const means = { logTvl: mean(logTvl), logAge: mean(logAge), growth: mean(growth) };
-  const sds = { logTvl: std(logTvl), logAge: std(logAge), growth: std(growth) };
-  const p = 4 + categories.length;
-  const X: number[][] = tr.map((i) => {
-    const f = feats[i]!;
-    const row = [1, (f.logTvl - means.logTvl) / sds.logTvl, (f.logAge - means.logAge) / sds.logAge, (f.growth - means.growth) / sds.growth];
-    for (const c of categories) row.push(f.category === c ? 1 : 0);
-    return row;
-  });
-  const beta = new Array<number>(p).fill(0);
-  for (let it = 0; it < LOGISTIC_ITERS; it++) {
-    const grad = new Array<number>(p).fill(0);
-    for (let r = 0; r < tr.length; r++) {
-      const z = X[r]!.reduce((s, x, j) => s + x * beta[j]!, 0);
-      const err = sigmoid(z) - y[tr[r]!]!;
-      for (let j = 0; j < p; j++) grad[j]! += X[r]![j]! * err;
-    }
-    for (let j = 0; j < p; j++) {
-      const pen = j === 0 ? 0 : LOGISTIC_LAMBDA * beta[j]!;
-      beta[j]! -= (LOGISTIC_LR * (grad[j]! + pen)) / tr.length;
-    }
+// Raw (unstandardised) logistic features: [1, lnTVL, age_yrs, growth, dummies].
+export function rawLogitFeatures(
+  ps: Proto[],
+  cats: string[],
+): { X: number[][]; names: string[] } {
+  const X: number[][] = [];
+  const names = ['const', 'lnTVL', 'age_yrs', 'growth'];
+  for (const c of cats) names.push('cat_' + c);
+  for (const p of ps) {
+    const row = [1, Math.log(p.tvl_usd), ageDays(p) / 365.25, growth(p)];
+    for (const c of cats) row.push(p.category === c ? 1 : 0);
+    X.push(row);
   }
-  const catBeta = new Map<string, number>();
-  categories.forEach((c, k) => catBeta.set(c, beta[4 + k]!));
+  return { X, names };
+}
+
+// Standardise non-intercept columns by train mean/std (population std).
+// Returns standardised train, standardised test (or null), mu, sd.
+export function standardize(
+  Xtr: number[][],
+  Xte: number[][] | null,
+): { Ztr: number[][]; Zte: number[][] | null; mu: number[]; sd: number[] } {
+  const k = Xtr[0].length;
+  const mu: number[] = [0];
+  const sd: number[] = [1];
+  for (let j = 1; j < k; j++) {
+    const col = Xtr.map((r) => r[j]);
+    mu.push(mean(col));
+    const s = popStd(col);
+    sd.push(s === 0 ? 1 : s);
+  }
+  const std = (row: number[]) =>
+    row.map((v, j) => (j === 0 ? v : (v - mu[j]) / sd[j]));
   return {
-    intercept: beta[0]!, bLogTvl: beta[1]!, bLogAge: beta[2]!, bGrowth: beta[3]!,
-    catBeta, means, sds, categories,
+    Ztr: Xtr.map(std),
+    Zte: Xte ? Xte.map(std) : null,
+    mu,
+    sd,
   };
 }
 
-export function logisticPredict(m: LogisticModel, f: OddsFeatures): number {
-  const z = m.intercept
-    + m.bLogTvl * ((f.logTvl - m.means.logTvl) / m.sds.logTvl)
-    + m.bLogAge * ((f.logAge - m.means.logAge) / m.sds.logAge)
-    + m.bGrowth * ((f.growth - m.means.growth) / m.sds.growth)
-    + (m.catBeta.get(f.category) ?? 0);
-  return sigmoid(z);
+// Right-censored Weibull log-likelihood. ages in years, floored at 1 day.
+export function weibullLoglik(
+  ages: number[],
+  events: number[],
+  k: number,
+  lam: number,
+): number {
+  let ll = 0;
+  for (let i = 0; i < ages.length; i++) {
+    const t = Math.max(ages[i], 1 / 365.25);
+    const r = t / lam;
+    if (events[i] === 1) {
+      ll += Math.log(k / lam) + (k - 1) * Math.log(r) - Math.pow(r, k);
+    } else {
+      ll += -Math.pow(r, k);
+    }
+  }
+  return ll;
 }
 
-/** Age-only Weibull for the token event, fitted by maximum likelihood on
- *  current-status data (a protocol with a token contributes its density at
- *  its age; one without contributes survival to its age). Grid search over
- *  shape k and scale in years. */
-export function fitWeibull(ageYears: number[], y: number[], trainIdx: number[]): { k: number; lambda: number } {
-  let best = { nll: Infinity, k: 0.75, lambda: 22 };
-  for (let k = 0.3; k <= 3.001; k += 0.02) {
-    for (let lam = 1; lam <= 100; lam += 1) {
-      let nll = 0;
-      for (const i of trainIdx) {
-        const t = Math.max(ageYears[i]!, 0.01);
-        const lt = Math.log(t);
-        const pow = (t / lam) ** k;
-        if (y[i] === 1) nll -= Math.log(k) - k * Math.log(lam) + (k - 1) * lt - pow;
-        else nll += pow;
+// Grid MLE for (k, lambda). Coarse grid for CV folds, fine grid + local
+// refine for the full-data fit. Grids are integer-indexed so both languages
+// visit identical points.
+export function weibullFit(
+  ages: number[],
+  events: number[],
+  coarse: boolean,
+): { k: number; lam: number } {
+  let best = { ll: -Infinity, k: 0, lam: 0 };
+  const consider = (k: number, lam: number) => {
+    const ll = weibullLoglik(ages, events, k, lam);
+    if (ll > best.ll) best = { ll, k, lam };
+  };
+  if (coarse) {
+    for (let i = 0; i <= 54; i++) {
+      const k = (30 + 5 * i) / 100;
+      for (let j = 0; j <= 59; j++) {
+        consider(k, 1 + j);
       }
-      if (nll < best.nll) best = { nll, k, lambda: lam };
     }
-  }
-  return { k: best.k, lambda: best.lambda };
-}
-
-export function weibullHasToken(k: number, lambda: number, ageYears: number): number {
-  const t = Math.max(ageYears, 0.01);
-  return 1 - Math.exp(-((t / lambda) ** k));
-}
-
-/** 12-month forward launch odds from the Weibull hazard: P(launch in the
- *  next 12 months | no token yet at this age). Falls with age when k < 1. */
-export function weibullForwardOdds(k: number, lambda: number, ageYears: number): number {
-  const a = Math.max(ageYears, 0);
-  return 1 - Math.exp(-(((a + 1) / lambda) ** k) + ((a / lambda) ** k));
-}
-
-export function brier(pred: number[], y: number[]): number {
-  return mean(pred.map((p, i) => (p - y[i]!) ** 2));
-}
-
-export interface OddsComparison {
-  logisticCv: number;
-  weibullCv: number;
-  categoryShareCv: number;
-  baseRate: number;
-  baseBrier: number;
-  winner: 'logistic' | 'weibull' | 'category-share';
-  logistic: LogisticModel;
-  weibull: { k: number; lambda: number };
-  categoryShare: Map<string, number>;
-}
-
-export function compareOdds(snap: Snapshot, feats: OddsFeatures[]): OddsComparison {
-  // The odds target is a token WITH A RECORDED MARKET CAP (mcap > 0, 128 of
-  // 758, base rate 0.169) — not merely a token record (416 of 758). A token
-  // with no measurable market cap is not a launch the board can value.
-  const y = snap.protocols.map((p) => (p.mcap_usd !== null && p.mcap_usd > 0 ? 1 : 0));
-  const baseRate = mean(y);
-  const baseBrier = mean(y.map((v) => (v - baseRate) ** 2));
-  const rng = new PythonRandom(FOLD_SEED);
-  const perm = rng.shuffle(Array.from({ length: y.length }, (_, i) => i));
-  const folds: number[][] = [];
-  for (let k = 0; k < 10; k++) folds.push(perm.filter((_, j) => j % 10 === k));
-  const predLog = new Array<number>(y.length).fill(0);
-  const predWei = new Array<number>(y.length).fill(0);
-  const predShare = new Array<number>(y.length).fill(0);
-  const ages = snap.protocols.map((p) => {
-    const a = ageDays(p, snap.as_of);
-    return a === null ? 0 : a / 365;
-  });
-  const allAges = ages.filter((a) => a > 0);
-  const medAgeY = median(allAges);
-  const ageY = ages.map((a) => (a === 0 ? medAgeY : a));
-  for (const test of folds) {
-    const testSet = new Set(test);
-    const train = perm.filter((i) => !testSet.has(i));
-    const lm = fitLogistic(feats, y, train);
-    for (const i of test) predLog[i] = logisticPredict(lm, feats[i]!);
-    const w = fitWeibull(ageY, y, train);
-    for (const i of test) predWei[i] = weibullHasToken(w.k, w.lambda, ageY[i]!);
-    const byCat = new Map<string, number[]>();
-    for (const i of train) {
-      const c = feats[i]!.category;
-      const arr = byCat.get(c) ?? [];
-      arr.push(y[i]!);
-      byCat.set(c, arr);
-    }
-    for (const i of test) {
-      const arr = byCat.get(feats[i]!.category);
-      predShare[i] = arr && arr.length > 0 ? mean(arr) : baseRate;
-    }
-  }
-  const logisticCv = brier(predLog, y);
-  const weibullCv = brier(predWei, y);
-  const categoryShareCv = brier(predShare, y);
-  const allIdx = Array.from({ length: y.length }, (_, i) => i);
-  const logistic = fitLogistic(feats, y, allIdx);
-  const weibull = fitWeibull(ageY, y, allIdx);
-  const shareMap = new Map<string, number>();
-  const byCatAll = new Map<string, number[]>();
-  for (let i = 0; i < y.length; i++) {
-    const c = feats[i]!.category;
-    const arr = byCatAll.get(c) ?? [];
-    arr.push(y[i]!);
-    byCatAll.set(c, arr);
-  }
-  for (const [c, arr] of byCatAll) shareMap.set(c, mean(arr));
-  let winner: OddsComparison['winner'] = 'logistic';
-  if (weibullCv < logisticCv && weibullCv < categoryShareCv) winner = 'weibull';
-  else if (categoryShareCv < logisticCv && categoryShareCv < weibullCv) winner = 'category-share';
-  return { logisticCv, weibullCv, categoryShareCv, baseRate, baseBrier, winner, logistic, weibull, categoryShare: shareMap };
-}
-
-/** The board's odds: the CV winner's prediction for this protocol. */
-export function oddsFor(cmp: OddsComparison, snap: Snapshot, feats: OddsFeatures[], idx: number): number {
-  if (cmp.winner === 'logistic') return logisticPredict(cmp.logistic, feats[idx]!);
-  if (cmp.winner === 'weibull') {
-    const a = ageDays(snap.protocols[idx]!, snap.as_of);
-    const ageY = a === null ? 0 : a / 365;
-    return weibullHasToken(cmp.weibull.k, cmp.weibull.lambda, ageY);
-  }
-  return cmp.categoryShare.get(feats[idx]!.category) ?? cmp.baseRate;
-}
-
-// ---- candidate / exclusion rules ----
-
-export const EXCLUDED_CATEGORIES = new Set(['CEX', 'Canonical Bridge', 'Bridge', 'Liquid Staking', 'Restaked BTC', 'Anchor BTC']);
-export const EXCLUDE_PATTERN = /wrapped|staked|bridge|version|exchange|v2|v3|btc|bitcoin/i;
-
-export function exclusionReason(p: Protocol): string | null {
-  if (p.category !== null && EXCLUDED_CATEGORIES.has(p.category)) {
-    return `category ${p.category} is a wrapped, staked or bridged product or an exchange, not a protocol waiting on its own launch`;
-  }
-  if (EXCLUDE_PATTERN.test(p.name) || EXCLUDE_PATTERN.test(p.slug)) {
-    return 'name or slug marks it as a wrapped, staked or bridged product, a versioned release, an exchange or a bitcoin wrapper';
-  }
-  return null;
-}
-
-export function isCandidate(p: Protocol): boolean {
-  return isPreToken(p) && exclusionReason(p) === null;
-}
-
-// ---- farm plans: costed by chain gas, sized to minimum viable capital ----
-
-export const GAS_USD: Record<string, number> = {
-  Ethereum: 8,
-  Arbitrum: 0.3,
-  Optimism: 0.1,
-  Base: 0.05,
-  Polygon: 0.05,
-  BSC: 0.2,
-  Binance: 0.2, // DefiLlama's label for the same chain as BSC
-  Avalanche: 0.3,
-  Solana: 0.002,
-};
-export const GAS_DEFAULT = 1;
-export const BRIDGE_USD = 5;
-
-export function gasFor(chain: string): number {
-  return GAS_USD[chain] ?? GAS_DEFAULT;
-}
-
-export function primaryChain(p: Protocol): string {
-  return p.chains.length > 0 ? p.chains[0]! : 'Ethereum';
-}
-
-export function farmCost(p: Protocol, steps = 6): { cost: number; gasPerStep: number; bridge: number } {
-  const gasPerStep = gasFor(primaryChain(p));
-  const bridge = p.chains.length > 1 ? BRIDGE_USD : 0;
-  return { cost: steps * gasPerStep + bridge, gasPerStep, bridge };
-}
-
-export function minCapital(cost: number): number {
-  return Math.max(50, 10 * cost);
-}
-
-export type Verdict = 'farm' | 'watch' | 'thin';
-
-export function verdictFor(ev: number, odds: number, cost: number): Verdict {
-  if (ev >= 3 * cost && odds >= 0.05) return 'farm';
-  if (ev >= cost) return 'watch';
-  return 'thin';
-}
-
-function money(n: number): string {
-  if (n >= 1000) return `$${Math.round(n).toLocaleString('en-US')}`;
-  if (n >= 1) return `$${n.toFixed(2)}`;
-  return `$${n.toFixed(3)}`;
-}
-
-function categoryAction(category: string | null): { first: string; second: string } {
-  switch (category) {
-    case 'Lending':
-      return {
-        first: 'supply stablecoins to its lending market and hold the supply position',
-        second: 'borrow a small amount against the supply, then repay it in full',
-      };
-    case 'Dexs':
-      return {
-        first: 'swap into the pool and add liquidity to its largest pair',
-        second: 'remove half the liquidity, then add it back to show a second interaction',
-      };
-    case 'Yield':
-    case 'Yield Aggregator':
-      return {
-        first: 'deposit into its highest-TVL vault and hold the vault shares',
-        second: 'deposit a second, smaller amount into a different vault of the same protocol',
-      };
-    case 'Derivatives':
-      return {
-        first: 'open a small long position on its main market and hold it for a week',
-        second: 'close the position and open a second one in the opposite direction',
-      };
-    case 'RWA':
-      return {
-        first: 'buy a small position in its tokenized real-world asset offering',
-        second: 'hold the position and claim any yield it distributes',
-      };
-    case 'Basis Trading':
-      return {
-        first: 'enter its basis trade with a small notional and hold it for a week',
-        second: 'close the basis trade and re-enter once to show repeated use',
-      };
-    case 'Restaking':
-      return {
-        first: 'restake a small amount through its restaking flow and hold the receipt token',
-        second: 'delegate the receipt token to a second operator',
-      };
-    case 'CDP':
-      return {
-        first: 'mint a small amount of its stablecoin against collateral and hold it',
-        second: 'repay the mint in full, then mint once more',
-      };
-    default:
-      return {
-        first: 'use its main feature with a small amount and hold the resulting position',
-        second: 'use a second feature of the same protocol so the wallet shows more than one interaction type',
-      };
-  }
-}
-
-/** Six concrete steps for one candidate, each 20-600 characters, naming the
- *  protocol, its real primary chain and category, with a dollar cost and a
- *  time estimate per step. */
-export function farmSteps(p: Protocol, minCap: number, costInfo: { cost: number; gasPerStep: number; bridge: number }): string[] {
-  const chain = primaryChain(p);
-  const second = p.chains.length > 1 ? p.chains[1]! : null;
-  const gas = money(costInfo.gasPerStep);
-  const act = categoryAction(p.category);
-  const amt = money(Math.max(25, Math.round(minCap / 4)));
-  const steps: string[] = [
-    `Fund a fresh wallet on ${chain} with at least ${money(minCap)} in USDC plus ${gas} for fees, and keep this wallet dedicated to ${p.name} so every action is attributable to one address. Cost ${gas}, about 10 minutes.`,
-    `On ${chain}, ${act.first} with about ${amt} of capital; this is the protocol's core action and the one a future allocation would weight most. Cost ${gas}, about 15 minutes.`,
-    `Still on ${chain}, ${act.second}; a second interaction type matters because a single one-off deposit reads as airdrop farming rather than use. Cost ${gas}, about 15 minutes.`,
-  ];
-  if (second !== null) {
-    steps.push(`Bridge about ${amt} from ${chain} to ${second} (bridge about $${BRIDGE_USD}) and repeat the ${p.category ?? 'main'} action there; the bridge doubles the on-chain footprint for one extra fee. Cost ${money(costInfo.gasPerStep + BRIDGE_USD)}, about 20 minutes.`);
   } else {
-    steps.push(`Use ${p.name} on ${chain} a second time through a different entry point — a different pool or vault — so the wallet shows depth on one chain rather than a single transaction. Cost ${gas}, about 15 minutes.`);
-  }
-  steps.push(
-    `Return weekly for at least 8 weeks and repeat a small ${p.category ?? 'core'} action each visit, about 10 minutes per visit, so the activity reads as sustained use rather than a one-day grab before a snapshot. Cost ${gas} per visit.`,
-    `Save every transaction hash and a screenshot of the ${p.name} position page; if ${p.name} announces a token, verify the claim link from its official documentation before signing anything, then claim and decide whether to hold or sell. Cost ${gas}, about 10 minutes.`,
-  );
-  return steps;
-}
-
-// ---- peer anchor: nearest traded protocol, same category, closest log TVL ----
-
-export interface PeerAnchor {
-  name: string;
-  slug: string;
-  mcap_usd: number;
-  tvl_usd: number;
-  category: string | null;
-}
-
-export function peerAnchor(p: Protocol, traded: Protocol[]): PeerAnchor | null {
-  // An anchor needs an observed market cap: 272 of the 416 traded protocols
-  // record a token but no market cap, and they cannot anchor anything.
-  const withMcap = traded.filter((t) => t.mcap_usd !== null && t.mcap_usd > 0);
-  if (withMcap.length === 0) return null;
-  const logTvl = Math.log(p.tvl_usd);
-  let best: Protocol | null = null;
-  let bestDist = Infinity;
-  for (const t of withMcap) {
-    if (t.category !== p.category) continue;
-    const d = Math.abs(Math.log(t.tvl_usd) - logTvl);
-    if (d < bestDist) {
-      bestDist = d;
-      best = t;
+    for (let i = 0; i <= 270; i++) {
+      const k = (30 + i) / 100;
+      for (let j = 0; j <= 118; j++) {
+        consider(k, (2 + j) / 2);
+      }
     }
-  }
-  if (best === null) {
-    for (const t of withMcap) {
-      const d = Math.abs(Math.log(t.tvl_usd) - logTvl);
-      if (d < bestDist) {
-        bestDist = d;
-        best = t;
+    const bk = best.k;
+    const bl = best.lam;
+    for (let i = 0; i <= 40; i++) {
+      const k = bk - 0.02 + (i * 0.001);
+      if (k <= 0.05) continue;
+      for (let j = 0; j <= 20; j++) {
+        const lam = bl - 0.5 + j * 0.05;
+        if (lam < 0.5) continue;
+        consider(k, lam);
       }
     }
   }
-  if (best === null || best.mcap_usd === null) return null;
-  return { name: best.name, slug: best.slug, mcap_usd: best.mcap_usd, tvl_usd: best.tvl_usd, category: best.category };
+  return { k: best.k, lam: best.lam };
 }
 
-// ---- the radar: board, anchors, exclusions, and everything the page shows ----
+export function oddsPart(ps: Proto[]) {
+  const n = ps.length;
+  const y = ps.map((p) => {
+    const m = mcapNum(p);
+    return m !== null && m > 0 ? 1 : 0;
+  });
+  const ages = ps.map((p) => ageDays(p) / 365.25);
+  const baseRate = mean(y);
+  const top = topCategories(ps, 99, 20);
+  const cats = top.slice(1);
+  const refCat = top[0];
+  const { X: Xraw, names } = rawLogitFeatures(ps, cats);
+  const perm = new MT19937(SEED).shuffle(
+    Array.from({ length: n }, (_, i) => i),
+  );
+  const folds: number[][] = [];
+  for (let k = 0; k < 10; k++) {
+    const f: number[] = [];
+    for (let i = k; i < n; i += 10) f.push(perm[i]);
+    folds.push(f);
+  }
+  const pLog: number[] = new Array(n).fill(0);
+  const pWei: number[] = new Array(n).fill(0);
+  const pCat: number[] = new Array(n).fill(0);
+  for (let k = 0; k < 10; k++) {
+    const teSet = new Set(folds[k]);
+    const tr = Array.from({ length: n }, (_, j) => j).filter((j) => !teSet.has(j));
+    const te = folds[k];
+    const { Ztr, Zte } = standardize(
+      tr.map((j) => Xraw[j]),
+      te.map((j) => Xraw[j]),
+    );
+    const b = ridgeLogitFit(Ztr, tr.map((j) => y[j]));
+    for (let t = 0; t < te.length; t++) {
+      const lin = (Zte as number[][])[t].reduce((s, v, j) => s + v * b[j], 0);
+      pLog[te[t]] = sigmoid(lin);
+    }
+    const w = weibullFit(tr.map((j) => ages[j]), tr.map((j) => y[j]), true);
+    for (const j of te) {
+      const t = Math.max(ages[j], 1 / 365.25);
+      pWei[j] = 1 - Math.exp(-Math.pow(t / w.lam, w.k));
+    }
+    const rates = new Map<string, number>();
+    const byCat = new Map<string, number[]>();
+    for (const j of tr) {
+      const c = ps[j].category ?? '';
+      if (!byCat.has(c)) byCat.set(c, []);
+      byCat.get(c)?.push(y[j]);
+    }
+    for (const [c, v] of byCat) rates.set(c, mean(v));
+    for (const j of te) {
+      pCat[j] = rates.get(ps[j].category ?? '') ?? baseRate;
+    }
+  }
+  const cvLog = brier(pLog, y);
+  const cvWei = brier(pWei, y);
+  const cvCat = brier(pCat, y);
+  const baseBrier = brier(new Array(n).fill(baseRate), y);
+  // Full-data fits.
+  const { Ztr: Z } = standardize(Xraw, null);
+  const beta = ridgeLogitFit(Z, y);
+  const wei = weibullFit(ages, y, false);
+  const pFull = Z.map((row) =>
+    sigmoid(row.reduce((s, v, j) => s + v * beta[j], 0)),
+  );
+  return {
+    y,
+    ages,
+    cats,
+    refCat,
+    names,
+    beta,
+    weibull: wei,
+    pFull,
+    baseRate,
+    baseBrier,
+    cv: { logistic: cvLog, weibull: cvWei, catshare: cvCat },
+  };
+}
+
+export const AGE_BANDS: [number, number][] = [
+  [0, 180],
+  [180, 365],
+  [365, 730],
+  [730, 1100],
+  [1100, 1e9],
+];
+export const TVL_BANDS: [number, number][] = [
+  [5_000_000, 10_000_000],
+  [10_000_000, 25_000_000],
+  [25_000_000, 50_000_000],
+  [50_000_000, 100_000_000],
+  [100_000_000, 500_000_000],
+  [500_000_000, 1_000_000_000],
+  [1_000_000_000, 1e18],
+];
+
+export function cohortTables(ps: Proto[]) {
+  const tok = (p: Proto) => {
+    const m = mcapNum(p);
+    return m !== null && m > 0 ? 1 : 0;
+  };
+  const age = AGE_BANDS.map(([lo, hi]) => {
+    const m = ps.filter((p) => lo <= ageDays(p) && ageDays(p) < hi);
+    const t = m.reduce((s, p) => s + tok(p), 0);
+    return { lo, hi, n: m.length, tok: t, rate: m.length ? t / m.length : 0 };
+  });
+  const tvl = TVL_BANDS.map(([lo, hi]) => {
+    const m = ps.filter((p) => lo <= p.tvl_usd && p.tvl_usd < hi);
+    const t = m.reduce((s, p) => s + tok(p), 0);
+    return { lo, hi, n: m.length, tok: t, rate: m.length ? t / m.length : 0 };
+  });
+  return { age, tvl };
+}
+
+export function conformalPart(fit: Proto[]) {
+  const { X, y } = design(fit, 'M1', []);
+  const { resid } = ols(X, y);
+  const absR = resid.map((r) => Math.abs(r)).sort((a, b) => a - b);
+  const q80 = percentile(absR, 80);
+  const byCat = new Map<string, number[]>();
+  fit.forEach((p, i) => {
+    const c = p.category ?? '';
+    if (!byCat.has(c)) byCat.set(c, []);
+    byCat.get(c)?.push(Math.abs(resid[i]));
+  });
+  const perCat: { cat: string; n: number; q80: number }[] = [];
+  for (const [c, v] of byCat) {
+    if (v.length >= 6) {
+      perCat.push({
+        cat: c,
+        n: v.length,
+        q80: percentile(v.slice().sort((a, b) => a - b), 80),
+      });
+    }
+  }
+  perCat.sort((a, b) => b.n - a.n);
+  return { q80, perCat };
+}
+
+export function extraTests(fit: Proto[]) {
+  const { X, y } = design(fit, 'M1', []);
+  const n = fit.length;
+  // Placebo: shuffle the target, refit, LOO + R^2.
+  const ys = new MT19937(SEED).shuffle(y.slice());
+  const pb = ols(X, ys).beta;
+  const predP = X.map((row) => row.reduce((s, v, j) => s + v * pb[j], 0));
+  const ym = mean(ys);
+  const ssTot = ys.reduce((s, v) => s + (v - ym) * (v - ym), 0);
+  const ssRes = ys.reduce((s, v, i) => s + (v - predP[i]) * (v - predP[i]), 0);
+  const placeboR2 = 1 - ssRes / ssTot;
+  const pErrs: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const Xk = X.filter((_, j) => j !== i);
+    const yk = ys.filter((_, j) => j !== i);
+    const b = ols(Xk, yk).beta;
+    const pred = X[i].reduce((s, v, j) => s + v * b[j], 0);
+    pErrs.push(Math.abs(ys[i] - pred));
+  }
+  const placeboLoo = median(pErrs.map((e) => Math.exp(e)));
+  // Bootstrap: 200 resamples, slope + median-error spread.
+  const rng = new MT19937(SEED);
+  const slopes: number[] = [];
+  const meds: number[] = [];
+  for (let b = 0; b < 200; b++) {
+    const idx: number[] = [];
+    for (let i = 0; i < n; i++) idx.push(rng.randrange(n));
+    const Xb = idx.map((j) => X[j]);
+    const yb = idx.map((j) => y[j]);
+    const bb = ols(Xb, yb);
+    slopes.push(bb.beta[1]);
+    meds.push(bb.med);
+  }
+  const slopeSorted = slopes.slice().sort((a, b) => a - b);
+  const slopeCI: [number, number] = [
+    percentile(slopeSorted, 2.5),
+    percentile(slopeSorted, 97.5),
+  ];
+  const medRange: [number, number] = [Math.min(...meds), Math.max(...meds)];
+  // Blind: 20% holdout, separate seed.
+  const perm = new MT19937(BLIND_SEED).shuffle(
+    Array.from({ length: n }, (_, i) => i),
+  );
+  const te = perm.slice(0, 22);
+  const tr = perm.slice(22);
+  const bBlind = ols(tr.map((j) => X[j]), tr.map((j) => y[j])).beta;
+  const blindErrs = te.map((j) => {
+    const pred = X[j].reduce((s, v, jj) => s + v * bBlind[jj], 0);
+    return Math.abs(y[j] - pred);
+  });
+  const blindMed = median(blindErrs.map((e) => Math.exp(e)));
+  return {
+    placebo: { r2: placeboR2, loo: placeboLoo },
+    bootstrap: { slopeCI, medRange, B: 200 },
+    blind: { med: blindMed, nTest: te.length },
+  };
+}
+
+// ---------- farm economics ----------
+
+export const GAS: Record<string, number> = {
+  Ethereum: 0.32,
+  Arbitrum: 0.03,
+  Base: 0.02,
+  Solana: 0.00025,
+  Binance: 0.2,
+  BSC: 0.2,
+  Optimism: 0.02,
+  Polygon: 0.01,
+  Avalanche: 0.05,
+  Gnosis: 0.05,
+  Fantom: 0.05,
+  'zkSync Era': 0.03,
+  Linea: 0.02,
+  Scroll: 0.02,
+  Mantle: 0.02,
+  Blast: 0.02,
+};
+export const DEFAULT_GAS = 0.1;
+export const AIRDROP_SHARE = 0.05;
+export const BRIDGE_FEE = 2.0;
+export const FARM_HOURS = 2.0;
+
+export const SECOND_ACTION: Record<string, string> = {
+  Lending:
+    'Borrow a small amount against the deposit to register as an active borrower',
+  Dexs: 'Provide liquidity in the main pool to register as an active liquidity provider',
+  Yield: 'Stake the deposit in the yield vault to register as an active staker',
+  'Liquid Staking': 'Stake through the protocol to register as an active staker',
+  Derivatives: 'Open a small hedged position to register as an active trader',
+  RWA: 'Hold the tokenised position through one full accrual cycle',
+  CDP: 'Mint a small amount of the stable asset against the deposit',
+  Bridge: 'Bridge a small amount through the protocol to register as an active user',
+};
+export const DEFAULT_ACTION =
+  'Complete a second qualifying on-chain interaction in the protocol';
+
+export function primaryChain(p: Proto): string {
+  return p.chains && p.chains.length > 0 ? p.chains[0] : 'Ethereum';
+}
+
+export function gasCost(p: Proto): number {
+  return GAS[primaryChain(p)] ?? DEFAULT_GAS;
+}
+
+export function fmtGas(g: number): string {
+  return g < 0.01 ? g.toFixed(5) : g.toFixed(2);
+}
+
+export function farmPlan(p: Proto): { steps: string[]; cost: number } {
+  const g = gasCost(p);
+  const cost = BRIDGE_FEE + 6 * g;
+  const chain = primaryChain(p);
+  const name = p.name;
+  const second = SECOND_ACTION[p.category ?? ''] ?? DEFAULT_ACTION;
+  const steps = [
+    `Bridge funds to ${chain} for ${name} (bridge fee $${BRIDGE_FEE.toFixed(2)} plus gas $${fmtGas(g)}).`,
+    `Swap a portion of the bridged funds into the asset ${name} accepts (gas $${fmtGas(g)}).`,
+    `Deposit the swapped asset into ${name} as a supplier (gas $${fmtGas(g)}).`,
+    `${second} (gas $${fmtGas(g)}).`,
+    `Return once a week to repeat a small interaction so the position stays active (gas $${fmtGas(g)}).`,
+    `Claim any rewards and withdraw the position when the token launches (gas $${fmtGas(g)}).`,
+  ];
+  return { steps, cost };
+}
+
+// ---------- board ----------
 
 export interface BoardRow {
   slug: string;
   name: string;
-  rank: number;
-  implied_value_usd: number;
-  farm_steps: string[];
-  status: 'candidate';
   category: string | null;
-  chains: string[];
-  tvl_usd: number;
-  change_7d: number | null;
-  age_days: number | null;
+  chain: string;
+  tvl: number;
+  growth: number;
+  ageDays: number;
+  implied: number;
+  lo: number;
+  hi: number;
   odds: number;
-  ev_usd: number;
-  lo_usd: number;
-  hi_usd: number;
-  interval_log: number;
-  min_capital_usd: number;
-  farm_cost_usd: number;
-  verdict: Verdict;
-  break_even_x: number;
+  cohortAge: number;
+  cohortTvl: number;
+  ev: number;
+  flag: string | null;
+  verdict: string;
+  rank: number;
+  rankLo: number;
+  rankHi: number;
+  dstar: number;
+  mvc: number;
+  perHour: number;
+  cost: number;
+  steps: string[];
   watchlist: boolean;
-  peer_anchor: PeerAnchor | null;
 }
 
-export interface TradedRow {
-  slug: string;
-  name: string;
-  category: string | null;
-  tvl_usd: number;
-  mcap_usd: number;
-  multiple: number;
-  in_fit: boolean;
-}
-
-export interface ExcludedRow {
-  slug: string;
-  name: string;
-  category: string | null;
-  tvl_usd: number;
-  reason: string;
-  implied_value_usd: number;
-}
-
-export interface Radar {
-  asOf: string;
-  source: string;
-  counts: { protocols: number; traded: number; preToken: number; candidates: number; excluded: number; fit: number; watchlist: number };
-  model: { winner: ModelName; beta: number[]; r2: number; medianErr: number; formula: string };
-  ablation: { model: ModelName; loo: number; tenFold: number; walkForward: number; olderToNewer: number; sum: number }[];
-  conformal: { global: number; byCategory: Record<string, number> };
-  odds: { logisticCv: number; weibullCv: number; categoryShareCv: number; baseRate: number; baseBrier: number; winner: string; weibullK: number; weibullLambda: number; logisticAgeBeta: number };
-  board: BoardRow[];
-  traded: TradedRow[];
-  excluded: ExcludedRow[];
-  earlySize: number;
-  liveSize: number;
-}
-
-export function buildRadar(snap: Snapshot): { board: BoardRow[]; radar: Radar } {
-  const rows = buildFitRows(snap);
-  const cats = topCategories(rows, 8);
-  const { fits, held, winner } = selectModel(rows, cats, snap.as_of);
-  const winFit = fits.find((f) => f.name === winner)!;
-  const conf = conformal(rows, winFit, cats);
-  const feats = oddsFeatures(snap);
-  const oddsCmp = compareOdds(snap, feats);
-  const snapIdx = new Map(snap.protocols.map((p, i) => [p.slug, i]));
-
-  const traded = snap.protocols.filter((p) => hasToken(p));
-  const preToken = snap.protocols.filter((p) => isPreToken(p));
-  const candidates = preToken.filter((p) => isCandidate(p));
-  const excluded = preToken.filter((p) => !isCandidate(p));
-  const fitSlugs = new Set(rows.map((r) => r.p.slug));
-
-  // The winner's prediction for every protocol, from its own feature row.
-  const predictFor = (p: Protocol): number => {
-    const r: FitRow = {
-      p,
-      y: 0,
-      logTvl: Math.log(p.tvl_usd),
-      growth: growthClipped(p),
-      age: ageDays(p, snap.as_of) ?? median(rows.map((x) => x.age)),
-    };
-    const X = designMatrix([r], winner, cats)[0]!;
-    return X.reduce((s, x, j) => s + x * winFit.beta[j]!, 0);
-  };
-
-  const watchSet = new Set(snap.watchlist);
-  const scored = candidates
-    .map((p) => {
-      const logPred = predictFor(p);
-      const implied = Math.exp(logPred);
-      const idx = snapIdx.get(p.slug)!;
-      const odds = oddsFor(oddsCmp, snap, feats, idx);
-      const ev = implied * odds;
-      const q = intervalFor(p, conf);
-      const lo = Math.exp(logPred - q);
-      const hi = Math.exp(logPred + q);
-      const costInfo = farmCost(p, 6);
-      const minCap = minCapital(costInfo.cost);
-      return { p, implied, odds, ev, lo, hi, q, costInfo, minCap };
-    })
-    .sort((a, b) => b.implied - a.implied);
-
-  const board: BoardRow[] = scored.map((s, i) => ({
-    slug: s.p.slug,
-    name: s.p.name,
-    rank: i + 1,
-    implied_value_usd: Math.max(1, Math.round(s.implied)),
-    farm_steps: farmSteps(s.p, s.minCap, s.costInfo),
-    status: 'candidate',
-    category: s.p.category,
-    chains: s.p.chains,
-    tvl_usd: s.p.tvl_usd,
-    change_7d: s.p.change_7d,
-    age_days: ageDays(s.p, snap.as_of),
-    odds: s.odds,
-    ev_usd: Math.round(s.ev),
-    lo_usd: Math.max(1, Math.round(s.lo)),
-    hi_usd: Math.round(s.hi),
-    interval_log: s.q,
-    min_capital_usd: Math.round(s.minCap * 100) / 100,
-    farm_cost_usd: Math.round(s.costInfo.cost * 100) / 100,
-    verdict: verdictFor(s.ev, s.odds, s.costInfo.cost),
-    break_even_x: s.ev > 0 ? s.costInfo.cost / s.ev : Infinity,
-    watchlist: watchSet.has(s.p.slug),
-    peer_anchor: peerAnchor(s.p, traded),
-  }));
-
-  const tradedRows: TradedRow[] = traded
-    .map((p) => ({
-      slug: p.slug,
-      name: p.name,
-      category: p.category,
-      tvl_usd: p.tvl_usd,
-      mcap_usd: p.mcap_usd ?? 0,
-      multiple: p.mcap_usd !== null && p.mcap_usd > 0 ? p.mcap_usd / p.tvl_usd : 0,
-      in_fit: fitSlugs.has(p.slug),
-    }))
-    .sort((a, b) => b.mcap_usd - a.mcap_usd);
-
-  const excludedRows: ExcludedRow[] = excluded
-    .map((p) => ({
-      slug: p.slug,
-      name: p.name,
-      category: p.category,
-      tvl_usd: p.tvl_usd,
-      reason: exclusionReason(p) ?? 'excluded',
-      implied_value_usd: Math.max(1, Math.round(Math.exp(predictFor(p)))),
-    }))
-    .sort((a, b) => b.implied_value_usd - a.implied_value_usd);
-
-  const formula = winner === 'M0'
-    ? `log(mcap) = ${winFit.beta[0]!.toFixed(4)} + ${winFit.beta[1]!.toFixed(4)} x log(TVL)`
-    : winner === 'M1'
-      ? `log(mcap) = ${winFit.beta[0]!.toFixed(4)} + ${winFit.beta[1]!.toFixed(4)} x log(TVL) + ${winFit.beta[2]!.toFixed(4)} x growth`
-      : winner === 'M2'
-        ? `log(mcap) = ${winFit.beta[0]!.toFixed(4)} + ${winFit.beta[1]!.toFixed(4)} x log(TVL) + ${winFit.beta[2]!.toFixed(4)} x growth + ${winFit.beta[3]!.toFixed(6)} x age`
-        : `log(mcap) = ${winFit.beta[0]!.toFixed(4)} + ${winFit.beta[1]!.toFixed(4)} x log(TVL) + ${winFit.beta[2]!.toFixed(4)} x growth + ${winFit.beta[3]!.toFixed(6)} x age + 8 category terms`;
-
-  const radar: Radar = {
-    asOf: snap.as_of,
-    source: snap.source,
-    counts: {
-      protocols: snap.protocols.length,
-      traded: traded.length,
-      preToken: preToken.length,
-      candidates: candidates.length,
-      excluded: excluded.length,
-      fit: rows.length,
-      watchlist: snap.watchlist.length,
-    },
-    model: { winner, beta: winFit.beta, r2: winFit.r2, medianErr: winFit.medianErr, formula },
-    ablation: MODELS.map((m) => ({
-      model: m,
-      loo: held[m].loo,
-      tenFold: held[m].tenFold,
-      walkForward: held[m].walkForward,
-      olderToNewer: held[m].olderToNewer,
-      sum: held[m].sum,
-    })),
-    conformal: {
-      global: conf.global,
-      byCategory: Object.fromEntries([...conf.byCategory.entries()].sort((a, b) => a[1] - b[1])),
-    },
-    odds: {
-      logisticCv: oddsCmp.logisticCv,
-      weibullCv: oddsCmp.weibullCv,
-      categoryShareCv: oddsCmp.categoryShareCv,
-      baseRate: oddsCmp.baseRate,
-      baseBrier: oddsCmp.baseBrier,
-      winner: oddsCmp.winner,
-      weibullK: oddsCmp.weibull.k,
-      weibullLambda: oddsCmp.weibull.lambda,
-      logisticAgeBeta: oddsCmp.logistic.bLogAge,
-    },
-    board,
-    traded: tradedRows,
-    excluded: excludedRows,
-    earlySize: excluded.length,
-    liveSize: traded.length,
-  };
-  return { board, radar };
-}
-
-/** The dashboard reads this file: window.RADAR holds the whole radar. */
-export function dataScript(radar: Radar): string {
-  return `window.RADAR = ${JSON.stringify(radar)};\n`;
-}
-
-/** The gate's shape, checked before anything is written: ranks 1..N, implied
- *  value non-increasing with rank, every watchlist slug covered, farm steps
- *  3-12 strings of 20-600 characters each. Returns the first problem, if any. */
-export function boardIssue(board: BoardRow[], snap: Snapshot): string | null {
-  if (board.length < 100 || board.length > 4000) return `board holds ${board.length} rows, the gate wants 100 to 4000`;
-  const seen = new Set<string>();
-  let prev = Infinity;
-  for (let i = 0; i < board.length; i++) {
-    const row = board[i]!;
-    if (row.rank !== i + 1) return `row ${i} has rank ${row.rank}, expected ${i + 1}`;
-    if (!Number.isInteger(row.implied_value_usd) || row.implied_value_usd <= 0) return `row ${row.slug} has a non-positive implied value`;
-    if (row.implied_value_usd > prev) return `implied value rises at rank ${row.rank}`;
-    prev = row.implied_value_usd;
-    if (seen.has(row.slug)) return `slug ${row.slug} appears twice`;
-    seen.add(row.slug);
-    if (row.farm_steps.length < 3 || row.farm_steps.length > 12) return `row ${row.slug} has ${row.farm_steps.length} farm steps`;
-    for (const s of row.farm_steps) {
-      const t = s.trim();
-      if (t.length < 20 || t.length > 600) return `row ${row.slug} has a farm step of ${t.length} characters`;
+export function boardPart(
+  ps: Proto[],
+  fit: Proto[],
+  odds: ReturnType<typeof oddsPart>,
+  watchlist: string[],
+  abl: ReturnType<typeof ablation>,
+) {
+  const wl = new Set(watchlist);
+  const [b0, b1, b2] = abl.m1Beta;
+  const conf = conformalPart(fit);
+  const qcat = new Map(conf.perCat.map((c) => [c.cat, c.q80]));
+  const qglob = conf.q80;
+  const cohort = cohortTables(ps);
+  const ageRate = (p: Proto) => {
+    const a = ageDays(p);
+    for (const b of cohort.age) {
+      if (b.lo <= a && a < b.hi) return b.rate;
     }
+    return 0;
+  };
+  const tvlRate = (p: Proto) => {
+    for (const b of cohort.tvl) {
+      if (b.lo <= p.tvl_usd && p.tvl_usd < b.hi) return b.rate;
+    }
+    return 0;
+  };
+  const pMap = new Map<string, number>();
+  ps.forEach((p, i) => pMap.set(p.slug, odds.pFull[i]));
+  const rows: BoardRow[] = [];
+  for (const p of ps) {
+    if (hasToken(p)) continue;
+    const imp = Math.round(
+      Math.exp(b0 + b1 * Math.log(p.tvl_usd) + b2 * growth(p)),
+    );
+    const q = qcat.get(p.category ?? '') ?? qglob;
+    const lo = Math.round(imp / Math.exp(q));
+    const hi = Math.round(imp * Math.exp(q));
+    const o = pMap.get(p.slug) ?? 0;
+    const ev = Math.round(o * imp);
+    const reason = flagReason(p);
+    const { steps, cost } = farmPlan(p);
+    const rate = (AIRDROP_SHARE * imp) / p.tvl_usd;
+    const dstar = rate > 0 ? cost / rate : Infinity;
+    const mvc = Math.max(50, 10 * cost);
+    const net500 = 500 * rate - cost;
+    const perHour = net500 / FARM_HOURS;
+    let verdict: string;
+    if (reason !== null) verdict = 'FLAGGED';
+    else if (dstar <= 500 && o >= 0.1) verdict = 'FARM';
+    else if (dstar <= 5000 && o >= 0.05) verdict = 'WATCH';
+    else verdict = 'THIN';
+    rows.push({
+      slug: p.slug,
+      name: p.name,
+      category: p.category,
+      chain: primaryChain(p),
+      tvl: p.tvl_usd,
+      growth: growth(p),
+      ageDays: ageDays(p),
+      implied: imp,
+      lo,
+      hi,
+      odds: o,
+      cohortAge: ageRate(p),
+      cohortTvl: tvlRate(p),
+      ev,
+      flag: reason,
+      verdict,
+      rank: 0,
+      rankLo: 0,
+      rankHi: 0,
+      dstar,
+      mvc,
+      perHour,
+      cost,
+      steps,
+      watchlist: wl.has(p.slug),
+    });
   }
-  for (const w of snap.watchlist) {
-    if (!seen.has(w)) return `watchlist slug ${w} is missing from the board`;
+  const cand = rows
+    .filter((r) => r.flag === null)
+    .sort((a, b) => b.implied - a.implied);
+  const flag = rows
+    .filter((r) => r.flag !== null)
+    .sort((a, b) => b.implied - a.implied);
+  const board = [...cand, ...flag];
+  board.forEach((r, i) => (r.rank = i + 1));
+  const rankRange = (sub: BoardRow[], r: BoardRow): [number, number] => {
+    const up = 1 + sub.filter((s) => s.implied > r.hi).length;
+    const dn = 1 + sub.filter((s) => s.implied > r.lo).length;
+    return [up, dn];
+  };
+  for (const r of cand) {
+    const [lo, hi] = rankRange(cand, r);
+    r.rankLo = lo;
+    r.rankHi = hi;
   }
-  return null;
+  for (const r of flag) {
+    const [lo, hi] = rankRange(flag, r);
+    r.rankLo = lo;
+    r.rankHi = hi;
+  }
+  const countVerdicts = (rs: BoardRow[]) => {
+    const c: Record<string, number> = {};
+    for (const r of rs) c[r.verdict] = (c[r.verdict] ?? 0) + 1;
+    return c;
+  };
+  return {
+    board,
+    cand,
+    flag,
+    verdictsCand: countVerdicts(cand),
+    verdictsFlag: countVerdicts(flag),
+    qglob,
+    qcat: Object.fromEntries(qcat),
+    model: { b0, b1, b2 },
+  };
+}
+
+// ---------- top-level ----------
+
+export function analyze(snap: Snapshot) {
+  const ps = snap.protocols;
+  const traded = ps.filter(hasToken);
+  const pre = ps.filter((p) => !hasToken(p));
+  const fit = fitset(ps);
+  const abl = ablation(fit);
+  const odds = oddsPart(ps);
+  const cohort = cohortTables(ps);
+  const conf = conformalPart(fit);
+  const extra = extraTests(fit);
+  const board = boardPart(ps, fit, odds, snap.watchlist, abl);
+  const aboveFloor = pre.filter((p) => p.tvl_usd >= FLOOR_USD).length;
+  const wlInCand = board.cand.filter((r) => r.watchlist).length;
+  return {
+    meta: {
+      asOf: snap.as_of,
+      total: ps.length,
+      traded: traded.length,
+      preToken: pre.length,
+      cand: board.cand.length,
+      flagged: board.flag.length,
+      watchlist: snap.watchlist.length,
+      watchlistInCand: wlInCand,
+      aboveFloor,
+      nFit: fit.length,
+    },
+    fit: abl,
+    odds,
+    cohort,
+    conformal: conf,
+    extra,
+    board: board.board,
+    topCand: board.cand.slice(0, 5),
+    topFlag: board.flag.slice(0, 5),
+    verdictsCand: board.verdictsCand,
+    verdictsFlag: board.verdictsFlag,
+    model: board.model,
+    qglob: board.qglob,
+  };
 }
